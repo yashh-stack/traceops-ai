@@ -1,5 +1,5 @@
-# Multi-Stage Dockerfile for TraceOps AI (Standalone Cloud Run Engine)
-# Serves high-performance FastAPI proxy directly on $PORT (Default: 8080)
+# Multi-Stage Dockerfile for TraceOps AI (Streamlit Control Room + FastAPI Proxy)
+# Serves interactive Streamlit HUD on $PORT (Default: 8080) with background FastAPI proxy
 # Target architecture: linux/amd64
 
 FROM python:3.11-slim AS builder
@@ -39,7 +39,11 @@ COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/pytho
 COPY --from=builder /usr/local/bin /usr/local/bin
 
 COPY traceops/ /app/traceops/
+COPY dashboard/ /app/dashboard/
+COPY start.sh /app/start.sh
 COPY pyproject.toml /app/
+
+RUN chmod +x /app/start.sh
 
 # Non-root user for security best practices
 RUN useradd -m -u 1001 traceopsuser && \
@@ -48,8 +52,8 @@ USER traceopsuser
 
 EXPOSE 8080
 
-HEALTHCHECK --interval=15s --timeout=3s --retries=3 \
-  CMD curl -f http://localhost:8080/health || exit 1
+HEALTHCHECK --interval=20s --timeout=5s --retries=3 \
+  CMD curl -f http://localhost:8080/_stcore/health || exit 1
 
-# Launch production FastAPI proxy on $PORT via uvicorn
-CMD ["sh", "-c", "uvicorn traceops.api:app --host 0.0.0.0 --port ${PORT:-8080} --workers 2"]
+# Launch start.sh which coordinates FastAPI on 8000 and Streamlit on $PORT
+CMD ["/bin/bash", "/app/start.sh"]
