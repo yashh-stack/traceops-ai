@@ -1,0 +1,24 @@
+{
+  "timestamp": "2026-11-21T15:38:13Z",
+  "iterations": 200,
+  "slo_target_ms": 15.0,
+  "slo_achieved": true,
+  "latency_metrics_ms": {
+    "p50": 2.766,
+    "p90": 4.378,
+    "p95": 4.729,
+    "p99": 5.415,
+    "mean": 3.093,
+    "max": 5.93
+  },
+  "tier1_benchmarks_ms": {
+    "exact_loop_interception_ms": 0.0267,
+    "sub_1ms_slo_met": true
+  },
+  "industry_comparison": {
+    "gpu_slm_guardrail_baseline_ms": 152.0,
+    "traceops_p95_ms": 4.729,
+    "speedup_vs_gpu_slm": "32.14x faster",
+    "latency_reduction_percentage": "96.89%"
+  }
+}

@@ -1,0 +1,6 @@
+file 'C:/Users/yashs/Projects/traceops-ai/pitch/act_clips/act1_crisis.mp4'
+file 'C:/Users/yashs/Projects/traceops-ai/pitch/act_clips/act2_conventional_trap.mp4'
+file 'C:/Users/yashs/Projects/traceops-ai/pitch/act_clips/act3_architecture.mp4'
+file 'C:/Users/yashs/Projects/traceops-ai/pitch/act_clips/act4_live_demo.mp4'
+file 'C:/Users/yashs/Projects/traceops-ai/pitch/act_clips/act5_benchmarks.mp4'
+file 'C:/Users/yashs/Projects/traceops-ai/pitch/act_clips/act6_vision.mp4'
