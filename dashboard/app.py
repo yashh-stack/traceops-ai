@@ -1,18 +1,12 @@
 """
-TraceOps AI: Live Jury Control Room.
-Dark-mode, 1-screen live dashboard built for the 3-minute jury pitch
-at Google DeepMind x Cloud Startup Buildathon India 2026.
+TraceOps AI: Live Jury Control Room & Circuit-Breaker HUD.
+Minimalist, high-performance dark-mode interface built for
+Google DeepMind x Cloud Startup Buildathon India 2026.
 
-Features:
-- Live Execution Mode Switch: SHADOW vs ENFORCE
-- Real-time FastAPI Proxy Health Badge (http://127.0.0.1:8000/health)
-- 4 One-Click Live Adversarial Triggers hitting the real FastAPI POST /v1/evaluate-step endpoint:
-  1. Normal Refund Query (ALLOW, ~6-7 ms)
-  2. Runaway Recursive Tool Loop (Tier 1 hash catch, <0.5 ms, HALT in ENFORCE / logged savings in SHADOW)
-  3. Unauthorized Tool Injection (delete_production_db) (Tier 1 allowlist block, <0.5 ms)
-  4. Semantic Policy Drift / High-Value Refund ($2,500.00 -> SUSPEND_HITL with Approve/Reject actions)
-- Live KPI Strip: Hot-Path Latency, Decision (ALLOW/WARN/SUSPEND_HITL/HALT), Cosine Drift, Estimated USD Saved,
-  and Async OTel Span + Gemini Flash Judge Feed (0 ms hot-path overhead).
+Architectural Invariant:
+"LLMs advise. The deterministic state machine decides."
+Hot path runs synchronously on CPU (<15 ms).
+Async cold path runs via OpenTelemetry + Gemini 3.5 Flash Lite.
 """
 import sys
 import os
@@ -35,51 +29,56 @@ FASTAPI_URL = os.getenv("FASTAPI_BASE_URL", "http://127.0.0.1:8000")
 
 # Configure Streamlit Page
 st.set_page_config(
-    page_title="TraceOps AI | Jury Control Room",
+    page_title="TraceOps AI | Circuit-Breaker HUD",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
 
-# Custom Dark Modern Styling
+# Custom Clean Dark-Mode Styling
 st.markdown("""
 <style>
     .stApp {
-        background-color: #0b0f19;
-        color: #e2e8f0;
+        background-color: #090d16;
+        color: #f1f5f9;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
     }
     .metric-card {
-        background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
-        border: 1px solid #334155;
-        border-radius: 10px;
-        padding: 14px;
+        background: #111827;
+        border: 1px solid #1f2937;
+        border-radius: 8px;
+        padding: 12px 14px;
         text-align: center;
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.5);
+        transition: border-color 0.2s ease;
+    }
+    .metric-card:hover {
+        border-color: #374151;
     }
     .metric-val {
-        font-size: 26px;
-        font-weight: 800;
-        margin-top: 4px;
+        font-size: 24px;
+        font-weight: 700;
+        margin-top: 2px;
+        font-family: 'Cascadia Code', 'Consolas', monospace;
     }
     .metric-lbl {
-        font-size: 12px;
+        font-size: 11px;
         color: #94a3b8;
         text-transform: uppercase;
-        letter-spacing: 0.05em;
+        letter-spacing: 0.08em;
+        font-weight: 600;
     }
     .status-allow { color: #10b981; }
     .status-warn { color: #f59e0b; }
-    .status-suspend_hitl { color: #ec4899; }
+    .status-suspend_hitl { color: #f43f5e; }
     .status-halt { color: #ef4444; }
     .badge-latency { color: #38bdf8; }
-    .badge-usd { color: #a855f7; }
-    .badge-hitl {
-        background-color: #831843;
-        color: #fbcfe8;
-        padding: 4px 10px;
-        border-radius: 6px;
-        font-size: 12px;
-        font-weight: bold;
+    .badge-usd { color: #c084fc; }
+    .hitl-box {
+        background-color: rgba(244, 63, 94, 0.08);
+        border: 1px solid #f43f5e;
+        border-radius: 8px;
+        padding: 14px;
+        margin-top: 10px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -98,7 +97,9 @@ if "last_latency" not in st.session_state:
 if "last_drift" not in st.session_state:
     st.session_state.last_drift = 0.0
 if "last_reason" not in st.session_state:
-    st.session_state.last_reason = "System ready. Click an adversarial trigger or send requests."
+    st.session_state.last_reason = "System idle. Fire an adversarial scenario or custom tool step below."
+if "last_span" not in st.session_state:
+    st.session_state.last_span = None
 if "pending_hitl" not in st.session_state:
     st.session_state.pending_hitl = None
 
@@ -106,41 +107,41 @@ if "pending_hitl" not in st.session_state:
 def check_fastapi_health() -> tuple[bool, str]:
     try:
         req = urllib.request.Request(f"{FASTAPI_URL}/health", headers={"User-Agent": "TraceOps-Dashboard"})
-        with urllib.request.urlopen(req, timeout=1.0) as resp:
+        with urllib.request.urlopen(req, timeout=0.8) as resp:
             if resp.status == 200:
                 data = json.loads(resp.read().decode("utf-8"))
-                return True, f"ONLINE (v1.0.0, {data.get('mode', 'enforce').upper()})"
+                return True, f"ONLINE (Proxy: {data.get('mode', 'enforce').upper()})"
     except Exception:
         pass
-    return False, "OFFLINE (Using In-Process Breaker Fallback)"
+    return False, "IN-PROCESS (Zero-Config Engine)"
 
 fastapi_online, health_label = check_fastapi_health()
 
-# Top Header Bar
-col_h1, col_h2, col_h3 = st.columns([2.5, 1.2, 1.3])
-with col_h1:
-    st.title("⚡ TraceOps AI: Deterministic Agent Circuit-Breaker")
-    st.caption("Google DeepMind x Cloud Startup Buildathon India 2026 | Hot-Path Guard (<15 ms) & Runtime Evals Engine")
+# Top Navigation Bar
+h_col1, h_col2, h_col3 = st.columns([2.8, 1.2, 1.2])
+with h_col1:
+    st.markdown("### ⚡ **TraceOps AI** · Deterministic Circuit-Breaker")
+    st.caption("Google DeepMind × Google Cloud Startup Buildathon India 2026 | Sub-15ms CPU Hot-Path Guard")
 
-with col_h2:
-    st.write("**FastAPI Proxy:**")
+with h_col2:
+    st.caption("Engine Runtime")
     if fastapi_online:
         st.success(f"🟢 {health_label}")
     else:
-        st.warning(f"🟡 {health_label}")
+        st.info(f"⚡ {health_label}")
 
-with col_h3:
+with h_col3:
     mode_toggle = st.radio(
-        "**Execution Mode:**",
+        "Execution Mode",
         options=["ENFORCE", "SHADOW"],
         horizontal=True,
         index=0 if st.session_state.breaker.mode == "enforce" else 1,
-        help="ENFORCE halts rogue calls; SHADOW logs violations & simulated dollar savings without blocking."
+        label_visibility="collapsed",
+        help="ENFORCE halts rogue calls with HTTP 403; SHADOW logs violations & simulated dollar savings."
     )
     new_mode = "enforce" if mode_toggle == "ENFORCE" else "shadow"
     if st.session_state.breaker.mode != new_mode:
         st.session_state.breaker.set_mode(new_mode)
-        # Also sync remote FastAPI if online
         try:
             req = urllib.request.Request(
                 f"{FASTAPI_URL}/v1/mode?mode={new_mode}",
@@ -148,7 +149,7 @@ with col_h3:
                 headers={"Content-Type": "application/json"},
                 method="POST"
             )
-            urllib.request.urlopen(req, timeout=1.0)
+            urllib.request.urlopen(req, timeout=0.8)
         except Exception:
             pass
         st.toast(f"Mode switched to: {new_mode.upper()}", icon="🔄")
@@ -192,9 +193,9 @@ with m4:
 with m5:
     st.markdown(f"""
     <div class="metric-card">
-        <div class="metric-lbl">Active Mode</div>
-        <div class="metric-val" style="color: {'#3b82f6' if st.session_state.breaker.mode == 'enforce' else '#eab308'};">
-            {st.session_state.breaker.mode.upper()}
+        <div class="metric-lbl">SLO Budget Headroom</div>
+        <div class="metric-val" style="color: #10b981;">
+            {max(0.0, 15.0 - st.session_state.last_latency):.1f} ms
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -213,7 +214,6 @@ def dispatch_step_eval(tool_name: str, args: dict, context: str, scenario: str =
         "mode": st.session_state.breaker.mode
     }
 
-    # 1. Try FastAPI Proxy endpoint
     if fastapi_online:
         try:
             req_data = json.dumps(payload).encode("utf-8")
@@ -222,19 +222,18 @@ def dispatch_step_eval(tool_name: str, args: dict, context: str, scenario: str =
                 data=req_data,
                 headers={"Content-Type": "application/json"}
             )
-            with urllib.request.urlopen(req, timeout=3.0) as resp:
+            with urllib.request.urlopen(req, timeout=2.0) as resp:
                 res = json.loads(resp.read().decode("utf-8"))
                 record_event(tool_name, res)
                 return
         except urllib.error.HTTPError as he:
-            # 403 Forbidden is ENFORCE HALT
             err_data = json.loads(he.read().decode("utf-8"))
             record_event(tool_name, err_data, halted=True)
             return
         except Exception:
             pass
 
-    # 2. In-Process Breaker Fallback
+    # In-Process Breaker Fallback
     try:
         res = st.session_state.breaker.evaluate_step(
             tool_name=tool_name,
@@ -254,6 +253,7 @@ def record_event(tool_name: str, res: dict, halted: bool = False):
     st.session_state.last_latency = float(res.get("latency_ms", 0.0))
     st.session_state.last_drift = float(res.get("drift_score", 0.0))
     st.session_state.last_reason = res.get("reason", "Action evaluated.")
+    st.session_state.last_span = res.get("otel_span", {})
     st.session_state.usd_saved = float(res.get("total_simulated_usd_saved", st.session_state.usd_saved))
 
     if decision == "SUSPEND_HITL":
@@ -273,15 +273,14 @@ def record_event(tool_name: str, res: dict, halted: bool = False):
         "reason": res.get("reason", "")
     })
 
-# Main Layout
-col_left, col_right = st.columns([1.3, 1.7])
+# Main Content Layout
+col_left, col_right = st.columns([1.2, 1.8])
 
 with col_left:
-    st.subheader("🎯 1-Click Live Adversarial Scenarios")
-    st.caption("Fires live requests against POST /v1/evaluate-step with zero hot-path LLM overhead.")
+    st.markdown("#### 🎯 **1-Click Adversarial Scenarios**")
+    st.caption("Fires live agent tool calls against the deterministic guard rails.")
 
-    # Trigger 1: Normal Refund Query
-    b1 = st.button("✅ 1. Normal Refund Query (ALLOW, ~6–7 ms)", use_container_width=True)
+    b1 = st.button("✅ 1. Normal Query (`ALLOW`, ~3 ms)", use_container_width=True)
     if b1:
         dispatch_step_eval(
             tool_name="refund_user",
@@ -291,10 +290,8 @@ with col_left:
         )
         st.rerun()
 
-    # Trigger 2: Runaway Recursive Loop
-    b2 = st.button("🚨 2. Runaway Recursive Loop (Exact Hash <0.5 ms)", use_container_width=True)
+    b2 = st.button("🚨 2. Runaway Tool Loop (Tier-1 Catch <0.1 ms)", use_container_width=True)
     if b2:
-        st.info("Simulating 3 identical recursive tool calls...")
         for _ in range(3):
             dispatch_step_eval(
                 tool_name="fetch_pod_logs",
@@ -304,8 +301,7 @@ with col_left:
             )
         st.rerun()
 
-    # Trigger 3: Unauthorized Tool Injection
-    b3 = st.button("🛑 3. Unauthorized Tool Injection (delete_production_db)", use_container_width=True)
+    b3 = st.button("🛑 3. Unauthorized Tool (`delete_production_db`)", use_container_width=True)
     if b3:
         dispatch_step_eval(
             tool_name="delete_production_db",
@@ -315,8 +311,7 @@ with col_left:
         )
         st.rerun()
 
-    # Trigger 4: High-Value Refund HITL Suspend
-    b4 = st.button("⏸️ 4. High-Value Refund ($2,500.00 -> SUSPEND_HITL)", use_container_width=True)
+    b4 = st.button("⏸️ 4. High-Stakes Action ($2,500 Refund -> `SUSPEND_HITL`)", use_container_width=True)
     if b4:
         dispatch_step_eval(
             tool_name="refund_user",
@@ -326,29 +321,46 @@ with col_left:
         )
         st.rerun()
 
-    # Interactive Human-in-the-Loop Dialog if suspended
+    # Interactive Human-in-the-Loop Sign-off Dialog
     if st.session_state.pending_hitl:
-        st.warning(f"⚠️ **Human-in-the-Loop Sign-Off Required**")
-        st.write(f"**Tool:** `{st.session_state.pending_hitl['tool']}`")
-        st.write(f"**Rationale:** {st.session_state.pending_hitl['reason']}")
+        st.markdown(f"""
+        <div class="hitl-box">
+            <b>⚠️ Human-in-the-Loop Approval Required</b><br>
+            <small><b>Action:</b> <code>{st.session_state.pending_hitl['tool']}</code></small><br>
+            <small><b>Audit:</b> {st.session_state.pending_hitl['reason']}</small>
+        </div>
+        """, unsafe_allow_html=True)
         h_col1, h_col2 = st.columns(2)
         with h_col1:
-            if st.button("👍 Approve Action", use_container_width=True):
+            if st.button("👍 Approve", use_container_width=True):
                 st.session_state.pending_hitl = None
                 st.session_state.last_status = "ALLOW"
-                st.session_state.last_reason = "Human Supervisor explicitly APPROVED high-stakes action."
+                st.session_state.last_reason = "Human Operator APPROVED high-stakes operation."
                 st.toast("Action APPROVED by Human Operator", icon="✅")
                 st.rerun()
         with h_col2:
-            if st.button("🚫 Reject Action", use_container_width=True):
+            if st.button("🚫 Reject", use_container_width=True):
                 st.session_state.pending_hitl = None
                 st.session_state.last_status = "HALT"
-                st.session_state.last_reason = "Human Supervisor explicitly REJECTED high-stakes action."
+                st.session_state.last_reason = "Human Operator REJECTED high-stakes operation."
                 st.toast("Action REJECTED by Human Operator", icon="🛑")
                 st.rerun()
 
+    # Custom Tool Evaluator for Judges & Users
+    with st.expander("🛠️ Test Custom Tool Step"):
+        custom_tool = st.text_input("Tool Name", value="query_gke_telemetry")
+        custom_args_raw = st.text_area("Arguments (JSON)", value='{"query": "cpu_utilization"}', height=70)
+        custom_ctx = st.text_input("Context / Goal", value="Monitor cluster health during peak load")
+        if st.button("Evaluate Custom Step", use_container_width=True):
+            try:
+                parsed_args = json.loads(custom_args_raw)
+                dispatch_step_eval(tool_name=custom_tool, args=parsed_args, context=custom_ctx)
+                st.rerun()
+            except json.JSONDecodeError as je:
+                st.error(f"Invalid JSON in arguments: {je}")
+
     st.write("")
-    if st.button("🔄 Reset Circuit Breaker State & History", use_container_width=True):
+    if st.button("🔄 Reset Circuit Breaker State", use_container_width=True):
         st.session_state.breaker.reset_trace()
         st.session_state.breaker.total_simulated_usd_saved = 0.0
         st.session_state.recent_events.clear()
@@ -357,24 +369,27 @@ with col_left:
         st.session_state.last_latency = 0.0
         st.session_state.last_drift = 0.0
         st.session_state.last_reason = "Circuit breaker reset to fresh state."
+        st.session_state.last_span = None
         st.session_state.pending_hitl = None
         TraceOpsOtelEmitter.get_instance().clear()
         try:
             req = urllib.request.Request(f"{FASTAPI_URL}/v1/reset", data=b"", method="POST")
-            urllib.request.urlopen(req, timeout=1.0)
+            urllib.request.urlopen(req, timeout=0.8)
         except Exception:
             pass
         st.rerun()
 
 with col_right:
-    st.subheader("📡 Live OpenTelemetry Span Feed & Diagnostics")
-    st.markdown(f"**Latest Decision Reason:** *{st.session_state.last_reason}*")
+    st.markdown("#### 📡 **Live Telemetry & Diagnostics**")
+    st.markdown(f"**Latest Decision:** *{st.session_state.last_reason}*")
 
     if st.session_state.recent_events:
         st.dataframe(
-            st.session_state.recent_events[:12],
+            st.session_state.recent_events[:10],
             use_container_width=True,
             column_config={
+                "timestamp": st.column_config.TextColumn("Time"),
+                "tool": st.column_config.TextColumn("Tool"),
                 "decision": st.column_config.TextColumn("Decision"),
                 "action": st.column_config.TextColumn("Action"),
                 "latency_ms": st.column_config.NumberColumn("Latency (ms)", format="%.2f"),
@@ -382,15 +397,20 @@ with col_right:
             }
         )
     else:
-        st.info("No telemetry spans logged yet. Click one of the 4 triggers on the left to fire live events.")
+        st.info("No telemetry events recorded yet. Click a scenario on the left to fire live events.")
 
-    # Google AI Stack & Architectural Proof Card
+    # OTel Span JSON inspector
+    if st.session_state.last_span:
+        with st.expander("🔍 Latest OpenTelemetry Span Payload"):
+            st.json(st.session_state.last_span)
+
+    # Architectural Proof
     with st.expander("🔬 Google Cloud & DeepMind Architecture Invariants"):
         st.markdown("""
-        - **Invariant 1**: *"LLMs advise. The deterministic state machine decides."* Zero LLM calls on hot path.
-        - **Tier-1 Guard**: Exact duplicate hash detector (`< 0.5 ms`), allowlist boundaries, and hard USD/token ceilings.
-        - **Tier-2 Scorer**: In-process cosine distance against preloaded golden centroids (`< 2.0 ms`).
-        - **Tier-3 State Machine**: Pure deterministic LangGraph arbiter (`ALLOW`, `WARN`, `SUSPEND_HITL`, `HALT`).
-        - **Async Judge**: Background OpenTelemetry spans evaluated by `gemini-3.5-flash-lite` (0 ms critical path overhead).
-        - **Offline Baseline**: Trajectory synthesis & pgvector centroids powered by `gemini-3.8-flash`.
+        - **Invariant**: *"LLMs advise. The deterministic state machine decides."* Zero LLMs on hot path.
+        - **Tier-1**: Exact duplicate hash detector (`< 0.1 ms`), least-privilege allowlist, token/USD budget ceilings.
+        - **Tier-2**: In-process cosine distance against preloaded pgvector centroids (`< 2.0 ms`).
+        - **Tier-3**: Pure deterministic LangGraph arbiter (`ALLOW`, `WARN`, `SUSPEND_HITL`, `HALT`).
+        - **Async Judge**: OpenTelemetry spans scored off critical path by `gemini-3.5-flash-lite` (0 ms user latency).
+        - **Offline Builder**: Trajectory baselines synthesized via `gemini-3.8-flash`.
         """)
