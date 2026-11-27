@@ -1,196 +1,64 @@
 # ⚡ TraceOps AI
 
 > **Deterministic Agent Circuit-Breaker & Runtime Evals Engine**  
-> *Google DeepMind x Cloud Startup Buildathon India 2026*
+> *Apache 2.0 Open-Core Infrastructure for Multi-Agent Systems (LangGraph, AutoGen, MCP)*
 
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg)](https://fastapi.tiangolo.com/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688.svg)](https://fastapi.tiangolo.com/)
 [![LangGraph](https://img.shields.io/badge/LangGraph-Deterministic_State_Machine-orange.svg)](https://langchain-ai.github.io/langgraph/)
-[![Google GenAI SDK](https://img.shields.io/badge/Google_GenAI_SDK-Gemini_Flash_%26_Pro-4285F4.svg)](https://ai.google.dev/)
-[![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-OTLP_Spans-black.svg)](https://opentelemetry.io/)
-[![Cloud Run](https://img.shields.io/badge/Google_Cloud_Run-Ready-4285F4.svg)](https://cloud.google.com/run)
+[![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-Batch_OTLP-black.svg)](https://opentelemetry.io/)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-green.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 
 ---
 
-## 🏛️ Core Architectural Invariant
+## Core Architectural Invariant
 
-> *"LLMs advise. The deterministic state machine decides."*
+> **"LLMs advise. The deterministic state machine decides."**
 
-Autonomous AI agents often suffer from catastrophic failure modes: recursive runaway tool loops, unauthorized destructive actions, and subtle semantic goal drift. **TraceOps AI** enforces deterministic circuit-breaker guards with a strict latency budget:
-
-- **Hot Path (<15 ms Synchronous Target, Measured ~4–7 ms):** Zero LLM network calls on the critical execution path. Pure in-memory duplicate tool hashing (<1 ms), hard USD/token ceilings, least-privilege allowlists with Pydantic validation, and in-process cosine drift scoring against cached golden centroids.
-- **Async Evals Path:** Dispatches non-blocking OpenTelemetry spans evaluated out-of-band by **Gemini 2.5 Flash** using the `google-genai` SDK, exporting DeepEval-compatible JSONL regression cases.
-- **Offline Baseline Synthesis:** Generates ideal agent trajectories and updates pgvector / in-memory centroids using **Gemini 2.5 Pro**.
+- **Hot Path (`< 15 ms` SLO on CPU, zero LLM calls):** Tier 1 deterministic hash loop detector, cumulative USD/token budget ceilings, least-privilege tool allowlist, Pydantic argument validation, PII/secret redaction, and Tier 2 in-process cosine drift scoring against cached centroids.
+- **Async Cold Path (`0 ms` hot-path overhead):** Tail-biased OpenTelemetry `BatchSpanProcessor` (`10%` nominal, `100%` halted/HITL, bounded `maxlen=500` ring buffer) paired with async `gemini-3.5-flash-lite` judge exporting DeepEval JSONL cases.
+- **Offline Baseline Builder:** Synthesizes golden trajectories via `gemini-3.8-flash` and refreshes optional Cloud SQL `pgvector` / local centroid cache.
 
 ---
 
-## 📐 Architecture Overview
+## 5-Line Quickstart (`SHADOW` -> `ENFORCE`)
 
-```mermaid
-flowchart TD
-    subgraph HotPath ["HOT PATH (<15 ms Target - Zero LLM Network Calls)"]
-        A["Agent Step: Tool Invocation"] --> B["Tier 1: Deterministic Guard (<1 ms)
-- Duplicate Tool Hash (max=3)
-- USD & Token Budget Ceiling
-- Tool Allowlist & Pydantic Schema"]
-        B -->|Pass| C["Tier 2: Semantic Drift Scorer (<2 ms)
-- In-process cosine distance against centroids
-- PostgreSQL + pgvector / In-Memory Fallback"]
-        B -->|Violation| D["Tier 3: Deterministic State Machine (LangGraph)"]
-        C --> D
-        D -->|Evaluate Mode| E{"Mode?"}
-        E -->|ENFORCE & Violation| F["HALT / CircuitBreakerError"]
-        E -->|SHADOW or Safe| G["ALLOW / WARN (Proceed)"]
-    end
-
-    subgraph AsyncPath ["ASYNC EVALS (Off Critical Path)"]
-        G -.->|Background Task / OTLP| H["OpenTelemetry Span Exporter"]
-        F -.->|Background Task / OTLP| H
-        H --> I["Async Judge (Gemini 2.5 Flash)"]
-        I --> J["DeepEval JSONL Regression Dataset"]
-        I --> K["Telemetry & Metrics Ledger"]
-    end
-
-    subgraph OfflinePath ["OFFLINE SYNTHESIS"]
-        L["Golden Agent Prompts"] --> M["Baseline Builder (Gemini 2.5 Pro)"]
-        M --> N["PostgreSQL + pgvector / Local Centroid Store"]
-        N -.->|Preload Centroids| C
-    end
-```
-
----
-
-## 🚀 Quickstart
-
-### 1. Installation
-Install TraceOps AI directly in your Python 3.11+ environment:
 ```bash
-git clone https://github.com/traceops-ai/traceops-ai.git
-cd traceops-ai
-pip install -e .
+git clone https://github.com/yashh-stack/traceops-ai.git && cd traceops-ai && pip install -e .
 ```
 
-### 2. Drop-in Python Decorator
-Protect any agent tool or dispatcher function:
 ```python
-import traceops
 from traceops import guard, CircuitBreakerError
 
-@guard(mode="enforce", max_cost_usd=0.50, scenario="incident_triage")
-def fetch_pod_logs(pod: str, namespace: str = "default"):
-    # Normal tool implementation
-    return f"Logs for {pod}"
-
-# Safe execution proceeds seamlessly (<5 ms overhead)
-logs = fetch_pod_logs(pod="frontend-xyz")
-
-# Rogue recursive loops or unaligned actions raise CircuitBreakerError
-try:
-    for _ in range(5):
-        fetch_pod_logs(pod="frontend-xyz")
-except CircuitBreakerError as e:
-    print(f"Breaker Tripped: {e.message}")
-    print(f"Saved: ${e.decision_record['estimated_usd_saved']}")
+# Start in SHADOW (audit savings safely), flip to ENFORCE to actively halt rogue steps
+@guard(mode="shadow", max_cost_usd=0.50, scenario="incident_triage")
+def fetch_pod_logs(pod: str):
+    return f"logs:{pod}"
 ```
 
-### 3. FastAPI Cloud Run Proxy
-Run the microsecond API proxy locally or on Google Cloud Run:
-```bash
-uvicorn traceops.api:app --host 0.0.0.0 --port 8080 --reload
-```
-
-#### Evaluation Endpoint
-```http
-POST /v1/evaluate-step
-Content-Type: application/json
-
-{
-  "tool_name": "fetch_pod_logs",
-  "arguments": {"pod": "auth-service-v1"},
-  "step_context": "triage auth service crash error logs",
-  "scenario": "incident_triage",
-  "mode": "enforce"
-}
-```
-
-Response:
-```json
-{
-  "trace_id": "7f8b91bc-5cb6-489e-975a",
-  "tool_name": "fetch_pod_logs",
-  "decision": "ALLOW",
-  "mode": "enforce",
-  "action_taken": "PROCEEDED",
-  "reason": "All deterministic invariant checks and semantic alignments passed.",
-  "tier1_status": "PASS",
-  "drift_score": 0.2381,
-  "estimated_usd_saved": 0.0,
-  "total_simulated_usd_saved": 0.0,
-  "latency_ms": 3.42,
-  "otel_span": { ... }
-}
-```
+Flip `mode="enforce"` (or `TRACEOPS_MODE=enforce`) to raise `CircuitBreakerError` (and HTTP `403 CIRCUIT_BREAKER_HALT` on the proxy) mid-flight when a loop, unauthorized tool, budget breach, or policy drift occurs.
 
 ---
 
-## 🎛️ Live Jury Control Room (Streamlit)
+## Verified Benchmarks
 
-Launch the interactive dark-mode jury control room:
-```bash
-streamlit run dashboard/app.py
-```
+Measured locally on CPU (`scripts/run_benchmark.py`, 200 hot-path evaluations):
 
-Features:
-- **Execution Mode Toggle:** Instant switch between `SHADOW` (passive monitoring & dollar savings simulation) and `ENFORCE` (active halting).
-- **1-Click Live Adversarial Scenarios:**
-  1. *Runaway Tool Loop*: Exactly catches 3 identical hashes in <1 ms.
-  2. *Hallucinated Tool*: Blocks `delete_production_db` via least-privilege allowlist.
-  3. *Semantic Goal Drift*: Intercepts credential exfiltration or unaligned actions.
-- **Real-Time Telemetry:** Live hot-path latency gauge (<15 ms), drift score, USD saved counter, and live OTel span stream.
+| Metric | Measured Result | SLO / Baseline |
+| :--- | :--- | :--- |
+| **Tier 1 Loop Interception** | `0.0534 ms` | `< 1.0 ms` |
+| **Hot-Path p50 / p95 / p99** | `4.11 ms` / `6.37 ms` / `12.84 ms` | p95 `< 15.0 ms` (`23.85x` faster vs `152 ms` GPU SLM) |
+| **Adversarial Test Suite** | `9/9` passed (`0` warnings) | `100%` pass gate |
+| **Dependency Audit (`pip-audit`)** | `0` known CVEs | `0` Critical/High |
+
+*(See Phase 5 Verification Report for updated post-hardening numbers).*
 
 ---
 
-## 🧪 Verification & Benchmarks
+## Production Security & Privacy Disclosure
 
-Run the adversarial verification suite:
-```bash
-python -c "import traceops.shims, pytest; pytest.main(['-v', '-s', 'tests/test_adversarial_suite.py'])"
-```
-
-### Empirical Results
-- **Runaway Loop Detection:** `< 0.35 ms` (Target: < 1.0 ms)
-- **Tool Allowlist Check:** `< 0.05 ms`
-- **In-process Drift Scorer:** `< 0.20 ms`
-- **Hot-Path p50 Latency:** `3.38 ms`
-- **Hot-Path p95 Latency:** `7.11 ms` (Target: < 15.0 ms)
-- **Adversarial Test Suite Pass Rate:** **100% (9/9 passed)**
-
----
-
-## ☁️ Cloud Run Deployment
-
-Deploy directly to Google Cloud Run in one command:
-```bash
-chmod +x deploy_cloud_run.sh
-./deploy_cloud_run.sh
-```
-
----
-
-## 👥 Google Agent Skills Export
-
-TraceOps AI exports standard Google Agent Skills in `traceops.skills`:
-- `drift_check`: In-process semantic goal drift verification against golden centroids.
-- `tool_boundary_audit`: Pre-execution least-privilege boundary validation.
-
-```python
-from traceops.skills import tool_boundary_audit, ToolBoundaryAuditInput
-
-result = tool_boundary_audit(ToolBoundaryAuditInput(tool_name="delete_production_db"))
-# Returns: {'compliant': False, 'decision': 'BLOCKED', 'violation': 'unauthorized_tool'}
-```
-
----
-
-## 📄 License
-Apache 2.0. Built for Google DeepMind x Cloud Startup Buildathon India 2026.
+- **Tier 1 Secret & PII Redaction:** API keys (`AIza...`, `sk-...`, `ghp_...`), Bearer tokens, DB credential URIs, emails, and sensitive dictionary keys (`password`, `token`, `secret`, `api_key`) are scrubbed in-process *before* OTLP span export, logs, or API telemetry responses.
+- **Fail-Closed Admin Controls:** `POST /v1/mode`, `POST /v1/reset`, and `GET /v1/spans` enforce constant-time `X-TraceOps-Admin-Key` verification via `hmac.compare_digest`. When `TRACEOPS_ENV=production` and `TRACEOPS_ADMIN_TOKEN` is unset, admin endpoints fail closed (`HTTP 503`).
+- **Bounded Memory & Concurrency:** Per-`trace_id` breaker states live in a thread-safe LRU+TTL cache (`maxsize=10000`, `ttl=1800s`), HTTP bodies are capped at `64 KB` (`413`), and sliding-window rate limiting guards against DoS.
+- **Reporting Vulnerabilities:** Do not open public GitHub issues for security flaws. Report privately to repository maintainers or via GitHub Security Advisories (`yashh-stack/traceops-ai`).
+- **License:** Apache 2.0.

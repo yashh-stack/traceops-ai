@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
-from traceops.guards.deterministic import DeterministicGuard, Tier1Violation
+from traceops.guards.deterministic import DeterministicGuard
 from traceops.guards.semantic_drift import SemanticDriftScorer
 
 class DriftCheckInput(BaseModel):

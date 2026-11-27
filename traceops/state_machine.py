@@ -8,9 +8,9 @@ ALLOW, WARN, or HALT.
 Zero LLM calls during graph traversal.
 """
 from __future__ import annotations
-import traceops.shims  # Ensure runtime binary shims are loaded
-from typing import Any, Dict, List, Literal, Optional, TypedDict
+from typing import Any, Dict, Literal, Optional, TypedDict
 from langgraph.graph import StateGraph, END
+import traceops.shims  # noqa: F401  # Install Windows DLL shims before langgraph imports
 
 class CircuitState(TypedDict):
     """Execution state of the circuit breaker step evaluation."""

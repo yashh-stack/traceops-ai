@@ -1,0 +1,25 @@
+# Exclude secrets, git metadata, caches, tests, and heavy media from Cloud Build / Docker context
+.git
+.gitignore
+.github
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.sqlite
+*.sqlite3
+*secret*
+*credential*
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+data/
+pitch/
+scripts/
+tests/
+benchmark_report.json
+*.md
+!README.md

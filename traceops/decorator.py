@@ -9,7 +9,7 @@ import inspect
 from typing import Any, Callable, Dict, Literal, Optional, Set, Type
 from pydantic import BaseModel
 
-from traceops.circuit_breaker import CircuitBreaker, CircuitBreakerError
+from traceops.circuit_breaker import CircuitBreaker
 
 def guard(
     mode: Literal["shadow", "enforce"] = "enforce",

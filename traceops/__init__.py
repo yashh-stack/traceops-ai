@@ -2,7 +2,7 @@
 TraceOps AI: Deterministic Agent Circuit-Breaker & Runtime Evals Engine.
 Package initialization and public exports.
 """
-import traceops.shims  # Install runtime binary shims before importing langgraph
+import traceops.shims  # noqa: F401  # Install runtime binary shims before langgraph imports
 
 from traceops.circuit_breaker import CircuitBreaker, CircuitBreakerError
 from traceops.decorator import guard

@@ -26,6 +26,7 @@ from traceops.otel_exporter import TraceOpsOtelEmitter
 from traceops.async_judge import AsyncJudge
 
 FASTAPI_URL = os.getenv("FASTAPI_BASE_URL", "http://127.0.0.1:8000")
+ADMIN_TOKEN = os.getenv("TRACEOPS_ADMIN_TOKEN", "")
 
 # Configure Streamlit Page
 st.set_page_config(
@@ -143,10 +144,13 @@ with h_col3:
     if st.session_state.breaker.mode != new_mode:
         st.session_state.breaker.set_mode(new_mode)
         try:
+            headers = {"Content-Type": "application/json"}
+            if ADMIN_TOKEN:
+                headers["X-TraceOps-Admin-Key"] = ADMIN_TOKEN
             req = urllib.request.Request(
                 f"{FASTAPI_URL}/v1/mode?mode={new_mode}",
                 data=b"",
-                headers={"Content-Type": "application/json"},
+                headers=headers,
                 method="POST"
             )
             urllib.request.urlopen(req, timeout=0.8)
@@ -373,7 +377,8 @@ with col_left:
         st.session_state.pending_hitl = None
         TraceOpsOtelEmitter.get_instance().clear()
         try:
-            req = urllib.request.Request(f"{FASTAPI_URL}/v1/reset", data=b"", method="POST")
+            reset_headers = {"X-TraceOps-Admin-Key": ADMIN_TOKEN} if ADMIN_TOKEN else {}
+            req = urllib.request.Request(f"{FASTAPI_URL}/v1/reset", data=b"", headers=reset_headers, method="POST")
             urllib.request.urlopen(req, timeout=0.8)
         except Exception:
             pass

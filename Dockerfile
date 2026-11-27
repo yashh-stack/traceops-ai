@@ -1,8 +1,8 @@
-# Multi-Stage Dockerfile for TraceOps AI (Streamlit Control Room + FastAPI Proxy)
-# Serves interactive Streamlit HUD on $PORT (Default: 8080) with background FastAPI proxy
+# Multi-Stage Hardened Dockerfile for TraceOps AI (Cloud Run Ready)
+# Serves Streamlit Control Room HUD on $PORT (8080) with background FastAPI proxy on 8000
 # Target architecture: linux/amd64
 
-FROM python:3.11-slim AS builder
+FROM python:3.12-slim AS builder
 
 WORKDIR /app
 
@@ -12,48 +12,44 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
-    curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt pyproject.toml ./
-RUN pip install --upgrade pip && \
+RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir .
+    pip install --no-cache-dir --no-deps .
 
-# Final lightweight runner image
-FROM python:3.11-slim AS runner
+# Final lightweight non-root runner image
+FROM python:3.12-slim AS runner
 
 WORKDIR /app
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PORT=8080 \
+    TRACEOPS_ENV=production \
     TRACEOPS_MODE=enforce
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy installed site-packages and binaries
-COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 
 COPY traceops/ /app/traceops/
 COPY dashboard/ /app/dashboard/
-COPY start.sh /app/start.sh
-COPY pyproject.toml /app/
+COPY start.sh pyproject.toml ./
 
-RUN chmod +x /app/start.sh
-
-# Non-root user for security best practices
-RUN useradd -m -u 1001 traceopsuser && \
+RUN chmod +x /app/start.sh && \
+    useradd -m -u 1001 -s /usr/sbin/nologin traceopsuser && \
     chown -R traceopsuser:traceopsuser /app
+
 USER traceopsuser
 
 EXPOSE 8080
 
 HEALTHCHECK --interval=20s --timeout=5s --retries=3 \
-  CMD curl -f http://localhost:8080/_stcore/health || exit 1
+  CMD curl -fsS http://localhost:8080/_stcore/health || exit 1
 
-# Launch start.sh which coordinates FastAPI on 8000 and Streamlit on $PORT
 CMD ["/bin/bash", "/app/start.sh"]

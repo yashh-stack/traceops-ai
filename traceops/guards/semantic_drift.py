@@ -7,7 +7,6 @@ Calculates cosine similarity / drift distance against cached golden trajectory
 centroids backed by PostgreSQL + pgvector (with an in-memory fallback cache for local demos).
 """
 from __future__ import annotations
-import math
 import hashlib
 import logging
 from typing import Any, Dict, List, Optional, Tuple
@@ -17,10 +16,23 @@ logger = logging.getLogger("traceops.semantic_drift")
 
 # SRE Baseline Golden Corpora for standard operational scenarios
 DEFAULT_SCENARIO_CORPUS = {
-    "default": "query fetch get search trace log metric gke pod deployment service canary cluster status telemetry investigate refund user claim",
-    "incident_triage": "incident triage failure 500 error latency exception pod crash crashloopbackoff investigate logs prometheus datadog gke query fetch get telemetry status refund user claim service",
-    "canary_deployment": "canary deployment rollout traffic shift istio virtualservice verify error budget rollback promote",
-    "resource_scaling": "scale hpa cpu memory limits requests horizontal pod autoscaler replica utilization"
+    "default": (
+        "query fetch get search trace log metric gke pod deployment service "
+        "canary cluster status telemetry investigate refund user claim"
+    ),
+    "incident_triage": (
+        "incident triage failure 500 error latency exception pod crash "
+        "crashloopbackoff investigate logs prometheus datadog gke query fetch "
+        "get telemetry status refund user claim service"
+    ),
+    "canary_deployment": (
+        "canary deployment rollout traffic shift istio virtualservice "
+        "verify error budget rollback promote"
+    ),
+    "resource_scaling": (
+        "scale hpa cpu memory limits requests horizontal pod autoscaler "
+        "replica utilization"
+    ),
 }
 
 class SemanticDriftScorer:
@@ -62,16 +74,21 @@ class SemanticDriftScorer:
         Zero external network call. Fast feature hashing into dimension-space.
         """
         vec = np.zeros(self.dimension, dtype=np.float32)
-        tokens = [
-            t.strip().lower()
-            for t in text.replace("_", " ").replace("-", " ").replace(":", " ").replace("{", " ").replace("}", " ").replace('"', " ").replace("'", " ").split()
-            if len(t.strip()) > 1
-        ]
+        cleaned = (
+            text.replace("_", " ")
+            .replace("-", " ")
+            .replace(":", " ")
+            .replace("{", " ")
+            .replace("}", " ")
+            .replace('"', " ")
+            .replace("'", " ")
+        )
+        tokens = [t.strip().lower() for t in cleaned.split() if len(t.strip()) > 1]
         if not tokens:
             return vec
 
         for token in tokens:
-            h = int(hashlib.md5(token.encode("utf-8")).hexdigest(), 16)
+            h = int(hashlib.md5(token.encode("utf-8"), usedforsecurity=False).hexdigest(), 16)
             idx = h % self.dimension
             sign = 1.0 if ((h >> 4) % 2 == 0) else -1.0
             vec[idx] += sign

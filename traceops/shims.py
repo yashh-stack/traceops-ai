@@ -3,46 +3,81 @@ Runtime Compatibility Shims for TraceOps AI.
 Provides clean stdlib fallbacks when platform/OS Application Control policies restrict
 binary C-extension DLLs (e.g. uuid_utils, xxhash, ormsgpack on Windows environments).
 """
+import hashlib
+import json
 import sys
 import types
 import uuid
-import hashlib
-import json
+from typing import Any
 
-def install_runtime_shims():
+
+class _MockUuidCompatModule(types.ModuleType):
+    uuid7: Any
+
+
+class _MockUuidModule(types.ModuleType):
+    UUID: Any
+    uuid4: Any
+    uuid7: Any
+    compat: _MockUuidCompatModule
+
+
+class _MockOrmsgpack(types.ModuleType):
+    packb: Any
+    unpackb: Any
+    MsgpackEncodeError: Any
+    MsgpackDecodeError: Any
+    OPT_NON_STR_KEYS: int
+    OPT_SERIALIZE_NUMPY: int
+    OPT_SERIALIZE_PYDANTIC: int
+    OPT_PASSTHROUGH_DATACLASS: int
+    OPT_PASSTHROUGH_DATETIME: int
+    OPT_PASSTHROUGH_SUBCLASS: int
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("OPT_"):
+            return 1
+        raise AttributeError(f"No attribute {name}")
+
+
+def install_runtime_shims() -> None:
     """Ensure uuid_utils, xxhash, and ormsgpack resolve cleanly to pure-python fallbacks."""
     # 1. xxhash shim
     if "xxhash" not in sys.modules or not hasattr(sys.modules["xxhash"], "xxh3_128_hexdigest"):
         m = types.ModuleType("xxhash")
+
         class MockXXH64:
-            def __init__(self, data=b"", seed=0):
-                self._m = hashlib.sha256(data if isinstance(data, (bytes, bytearray)) else str(data).encode("utf-8"))
-            def update(self, data):
-                self._m.update(data if isinstance(data, (bytes, bytearray)) else str(data).encode("utf-8"))
-            def intdigest(self):
+            def __init__(self, data: Any = b"", seed: int = 0):
+                raw = data if isinstance(data, (bytes, bytearray)) else str(data).encode("utf-8")
+                self._m = hashlib.sha256(raw)
+
+            def update(self, data: Any) -> None:
+                raw = data if isinstance(data, (bytes, bytearray)) else str(data).encode("utf-8")
+                self._m.update(raw)
+
+            def intdigest(self) -> int:
                 return int(self._m.hexdigest()[:16], 16)
-            def hexdigest(self):
+
+            def hexdigest(self) -> str:
                 return self._m.hexdigest()[:16]
-            def digest(self):
+
+            def digest(self) -> bytes:
                 return self._m.digest()[:8]
 
         for name in ["xxh64", "xxh32", "xxh128", "xxh3_64", "xxh3_128"]:
             setattr(m, name, MockXXH64)
 
-        def _hex(data, seed=0):
-            if isinstance(data, str):
-                data = data.encode("utf-8")
-            return hashlib.sha256(data).hexdigest()[:32]
+        def _hex(data: Any, seed: int = 0) -> str:
+            raw = data.encode("utf-8") if isinstance(data, str) else data
+            return hashlib.sha256(raw).hexdigest()[:32]
 
-        def _int(data, seed=0):
-            if isinstance(data, str):
-                data = data.encode("utf-8")
-            return int(hashlib.sha256(data).hexdigest()[:16], 16)
+        def _int(data: Any, seed: int = 0) -> int:
+            raw = data.encode("utf-8") if isinstance(data, str) else data
+            return int(hashlib.sha256(raw).hexdigest()[:16], 16)
 
-        def _dig(data, seed=0):
-            if isinstance(data, str):
-                data = data.encode("utf-8")
-            return hashlib.sha256(data).digest()[:16]
+        def _dig(data: Any, seed: int = 0) -> bytes:
+            raw = data.encode("utf-8") if isinstance(data, str) else data
+            return hashlib.sha256(raw).digest()[:16]
 
         for prefix in ["xxh64", "xxh32", "xxh128", "xxh3_64", "xxh3_128"]:
             setattr(m, f"{prefix}_hexdigest", _hex)
@@ -54,13 +89,14 @@ def install_runtime_shims():
 
     # 2. uuid_utils shim
     if "uuid_utils" not in sys.modules or not hasattr(sys.modules["uuid_utils"], "UUID"):
-        mock_uuid = types.ModuleType("uuid_utils")
+        mock_uuid = _MockUuidModule("uuid_utils")
+        uuid7_fn = getattr(uuid, "uuid7", uuid.uuid4)
         mock_uuid.UUID = uuid.UUID
         mock_uuid.uuid4 = uuid.uuid4
-        mock_uuid.uuid7 = getattr(uuid, "uuid7", uuid.uuid4)
+        mock_uuid.uuid7 = uuid7_fn
 
-        mock_compat = types.ModuleType("uuid_utils.compat")
-        mock_compat.uuid7 = mock_uuid.uuid7
+        mock_compat = _MockUuidCompatModule("uuid_utils.compat")
+        mock_compat.uuid7 = uuid7_fn
         mock_uuid.compat = mock_compat
 
         sys.modules["uuid_utils"] = mock_uuid
@@ -68,17 +104,15 @@ def install_runtime_shims():
         sys.modules["uuid_utils._uuid_utils"] = mock_uuid
 
     # 3. ormsgpack shim
-    if "ormsgpack" not in sys.modules or not hasattr(sys.modules["ormsgpack"], "OPT_PASSTHROUGH_DATACLASS"):
-        class MockOrmsgpack(types.ModuleType):
-            def __getattr__(self, name):
-                if name.startswith("OPT_"):
-                    return 1
-                raise AttributeError(f"No attribute {name}")
+    if "ormsgpack" not in sys.modules or not hasattr(
+        sys.modules["ormsgpack"], "OPT_PASSTHROUGH_DATACLASS"
+    ):
+        mock_ormsgpack = _MockOrmsgpack("ormsgpack")
 
-        mock_ormsgpack = MockOrmsgpack("ormsgpack")
-        def mock_packb(o, **kwargs):
+        def mock_packb(o: Any, **kwargs: Any) -> bytes:
             return json.dumps(o, default=str).encode("utf-8")
-        def mock_unpackb(b, **kwargs):
+
+        def mock_unpackb(b: bytes, **kwargs: Any) -> Any:
             return json.loads(b.decode("utf-8"))
 
         mock_ormsgpack.packb = mock_packb
@@ -94,5 +128,6 @@ def install_runtime_shims():
 
         sys.modules["ormsgpack"] = mock_ormsgpack
         sys.modules["ormsgpack.ormsgpack"] = mock_ormsgpack
+
 
 install_runtime_shims()

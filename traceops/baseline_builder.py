@@ -4,12 +4,12 @@ Synthesizes golden agent trajectories using Gemini Pro and refreshes
 the PostgreSQL + pgvector centroid store and local in-process centroid cache.
 """
 from __future__ import annotations
-import os
 import json
 import logging
 from typing import Any, Dict, List, Optional
 import numpy as np
 
+from traceops.config import get_settings
 from traceops.guards.semantic_drift import SemanticDriftScorer
 
 logger = logging.getLogger("traceops.baseline_builder")
@@ -25,9 +25,10 @@ class BaselineBuilder:
         model_name: Optional[str] = None,
         pg_url: Optional[str] = None
     ):
-        self.api_key = api_key or os.getenv("GEMINI_API_KEY", "")
-        self.model_name = model_name or os.getenv("GEMINI_BASELINE_MODEL", "gemini-3.8-flash")
-        self.pg_url = pg_url or os.getenv("DATABASE_URL", "")
+        settings = get_settings()
+        self.api_key = api_key if api_key is not None else settings.gemini_api_key.get_secret_value()
+        self.model_name = model_name or settings.gemini_baseline_model
+        self.pg_url = pg_url if pg_url is not None else settings.database_url.get_secret_value()
         self.client = None
 
         if self.api_key:
@@ -78,7 +79,11 @@ Output JSON as a list of tool objects, e.g.:
             {"step": 1, "tool_name": "query_gke_telemetry", "intent": "check cluster health"},
             {"step": 2, "tool_name": "fetch_pod_logs", "intent": "extract stack trace and status codes"},
             {"step": 3, "tool_name": "get_service_metrics", "intent": "correlate cpu and memory spikes"},
-            {"step": 4, "tool_name": "run_canary_test", "intent": "validate candidate fix in isolated namespace"}
+            {
+                "step": 4,
+                "tool_name": "run_canary_test",
+                "intent": "validate candidate fix in isolated namespace",
+            },
         ]
 
     def refresh_centroids(
@@ -117,7 +122,7 @@ Output JSON as a list of tool objects, e.g.:
     def _save_to_pgvector(self, scenario: str, vector: List[float]) -> None:
         """Save centroid to pgvector table if live database is accessible."""
         try:
-            import psycopg
+            import psycopg  # type: ignore[import-not-found]
             with psycopg.connect(self.pg_url) as conn:
                 with conn.cursor() as cur:
                     cur.execute("""

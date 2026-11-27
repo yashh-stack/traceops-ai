@@ -8,7 +8,7 @@ Guarantees sub-millisecond execution (<1 ms) for:
 from __future__ import annotations
 import hashlib
 import json
-from typing import Any, Dict, List, Optional, Set, Type
+from typing import Any, Dict, Optional, Set, Type
 from pydantic import BaseModel, ValidationError
 
 class Tier1Violation(Exception):
@@ -60,7 +60,7 @@ class DeterministicGuard:
         """Generate deterministic MD5 hash of tool name and canonical JSON arguments."""
         canonical_args = json.dumps(arguments, sort_keys=True, separators=(",", ":"))
         content = f"{tool_name}:{canonical_args}".encode("utf-8")
-        return hashlib.md5(content).hexdigest()
+        return hashlib.md5(content, usedforsecurity=False).hexdigest()
 
     def evaluate_tool_call(
         self,
@@ -91,7 +91,7 @@ class DeterministicGuard:
                     rule="schema_validation_error",
                     message=f"Arguments failed schema validation for tool '{tool_name}': {e}",
                     details={"tool_name": tool_name, "validation_errors": e.errors()}
-                )
+                ) from e
 
         # Rule 3: Exact Duplicate Call Loop Detection
         call_hash = self.hash_tool_call(tool_name, arguments)
@@ -101,7 +101,10 @@ class DeterministicGuard:
         if current_count >= self.max_identical_calls:
             raise Tier1Violation(
                 rule="runaway_loop",
-                message=f"Runaway loop detected: tool '{tool_name}' called {current_count} times with identical arguments.",
+                message=(
+                    f"Runaway loop detected: tool '{tool_name}' called "
+                    f"{current_count} times with identical arguments."
+                ),
                 details={
                     "tool_name": tool_name,
                     "call_hash": call_hash,
@@ -117,7 +120,10 @@ class DeterministicGuard:
         if self.cumulative_cost_usd > self.max_cost_usd:
             raise Tier1Violation(
                 rule="cost_ceiling_exceeded",
-                message=f"Trace cost ceiling exceeded: ${self.cumulative_cost_usd:.4f} > limit ${self.max_cost_usd:.4f}",
+                message=(
+                    f"Trace cost ceiling exceeded: "
+                    f"${self.cumulative_cost_usd:.4f} > limit ${self.max_cost_usd:.4f}"
+                ),
                 details={"cumulative_cost_usd": self.cumulative_cost_usd, "limit": self.max_cost_usd}
             )
 
