@@ -122,7 +122,7 @@ Output JSON as a list of tool objects, e.g.:
     def _save_to_pgvector(self, scenario: str, vector: List[float]) -> None:
         """Save centroid to pgvector table if live database is accessible."""
         try:
-            import psycopg  # type: ignore[import-not-found]
+            import psycopg  # pyright: ignore[reportMissingImports]
             with psycopg.connect(self.pg_url) as conn:
                 with conn.cursor() as cur:
                     cur.execute("""
