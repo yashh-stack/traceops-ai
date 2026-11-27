@@ -2,3 +2,27 @@
 .env
 .env.*
 !.env.example
+
+# ==========================================
+# UNIVERSAL SECURITY & SECRET PROTECTION
+# ==========================================
+.env*
+!.env.example
+*.pem
+*.key
+*.sqlite
+*.sqlite3
+*secret*
+*credential*
+service-account*.json
+service_account*.json
+.antigravity/secrets*
+.antigravity/logs*
+.antigravity/*.json
+*.egg-info/
+build/
+dist/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/

@@ -18,7 +18,12 @@ from traceops.circuit_breaker import CircuitBreaker, CircuitBreakerError
 from traceops.guards.deterministic import DeterministicGuard, Tier1Violation
 from traceops.guards.semantic_drift import SemanticDriftScorer
 from traceops.decorator import guard
-from traceops.skills import drift_check, tool_boundary_audit, DriftCheckInput, ToolBoundaryAuditInput
+from traceops.skills import (
+    DriftCheckInput,
+    ToolBoundaryAuditInput,
+    drift_check,
+    tool_boundary_audit,
+)
 
 class QueryArgsSchema(BaseModel):
     cluster: str = Field(..., min_length=2)
@@ -119,11 +124,17 @@ def test_cost_budget_ceiling_enforced():
 def test_semantic_drift_scorer():
     """Verify in-process cosine similarity detects off-topic drift."""
     scorer = SemanticDriftScorer(drift_threshold=0.55)
-    aligned_res = scorer.evaluate_drift("query gke telemetry pod logs crash metrics", scenario="incident_triage")
+    aligned_res = scorer.evaluate_drift(
+        "query gke telemetry pod logs crash metrics",
+        scenario="incident_triage",
+    )
     assert aligned_res["status"] == "ALLOW"
     assert aligned_res["drift_score"] < 0.55
 
-    drift_res = scorer.evaluate_drift("bitcoin mining crypto private key password theft", scenario="incident_triage")
+    drift_res = scorer.evaluate_drift(
+        "bitcoin mining crypto private key password theft",
+        scenario="incident_triage",
+    )
     assert drift_res["status"] in ("HALT", "WARN")
     assert drift_res["drift_score"] >= 0.40
 
@@ -157,6 +168,15 @@ def test_agent_skills_export():
     audit_attack = tool_boundary_audit(ToolBoundaryAuditInput(tool_name="drop_database"))
     assert audit_attack["compliant"] is False
     assert audit_attack["decision"] == "BLOCKED"
+
+    drift_res = drift_check(
+        DriftCheckInput(
+            tool_name="query_gke_telemetry",
+            step_description="investigate gke pod crash error logs telemetry status",
+            scenario="incident_triage",
+        )
+    )
+    assert drift_res["status"] == "ALLOW"
 
 def test_hot_path_p95_latency_benchmark():
     """
@@ -196,3 +216,164 @@ def test_hot_path_p95_latency_benchmark():
 
     print(f"\n[BENCHMARK] p50: {p50:.2f} ms | p95: {p95:.2f} ms | p99: {p99:.2f} ms")
     assert p95 < 15.0, f"Hot-path p95 latency violation: {p95:.2f} ms >= 15.0 ms target"
+
+
+def test_pii_and_secret_scrubbing_before_otel():
+    """Verify secrets, bearer tokens, and emails are scrubbed before OTel span emission."""
+    from traceops.otel_exporter import TraceOpsOtelEmitter
+
+    emitter = TraceOpsOtelEmitter(maxlen=50, nominal_sample_rate=1.0)
+    breaker = CircuitBreaker(mode="shadow", otel_emitter=emitter)
+    res = breaker.evaluate_step(
+        tool_name="fetch_pod_logs",
+        arguments={
+            "pod": "auth-1",
+            "password": "super_secret_password",
+            "header": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.secret",
+            "user_email": "alice@example.com",
+            "gcp_key": "AIzaSyD1234567890ABCDEFGHIJKLMNOPQRSTUV",
+        },
+        step_context="investigate gke pod crash logs telemetry",
+        scenario="incident_triage",
+    )
+    span_args = res["otel_span"]["arguments"]
+    assert span_args["password"] == "[REDACTED]"  # noqa: S105
+    assert "[REDACTED_TOKEN]" in span_args["header"]
+    assert span_args["user_email"] == "[REDACTED_EMAIL]"
+    assert span_args["gcp_key"] == "[REDACTED_API_KEY]"
+
+    flushed = emitter.get_recent_spans(limit=10, flush=True)
+    assert len(flushed) >= 1
+
+
+def test_otel_batch_sampling_and_ring_buffer():
+    """Verify BatchSpanProcessor bounded deque(maxlen=N) and 100% HALT sampling."""
+    from traceops.otel_exporter import TraceOpsOtelEmitter
+
+    emitter = TraceOpsOtelEmitter(maxlen=3, nominal_sample_rate=0.0)
+    for i in range(6):
+        emitter.emit_decision_span(
+            trace_id_str=f"trace-halt-{i}",
+            tool_name="delete_production_db",
+            decision="HALT",
+            mode="enforce",
+            latency_ms=0.2,
+            tier1_status="FAIL",
+            drift_score=0.1,
+            reason="unauthorized",
+            estimated_usd_saved=0.5,
+            arguments={"i": i},
+        )
+    spans = emitter.get_recent_spans(limit=50, flush=True)
+    assert len(spans) == 3
+
+    # Nominal decision with 0.0 nominal rate is skipped
+    nominal_res = emitter.emit_decision_span(
+        trace_id_str="trace-allow-0",
+        tool_name="fetch_pod_logs",
+        decision="ALLOW",
+        mode="enforce",
+        latency_ms=1.0,
+        tier1_status="PASS",
+        drift_score=0.1,
+        reason="ok",
+        estimated_usd_saved=0.0,
+        arguments={},
+    )
+    assert nominal_res["sampled"] is False
+
+
+def test_admin_auth_fail_closed_in_production():
+    """Verify admin endpoints fail closed in production when unset, and require constant-time key."""
+    from fastapi.testclient import TestClient
+    from pydantic import SecretStr
+    from traceops.api import create_app
+    from traceops.config import TraceOpsSettings
+
+    # 1. Production with no admin token -> fails closed (503)
+    prod_unset = create_app(TraceOpsSettings(traceops_env="production", traceops_admin_token=None))
+    c1 = TestClient(prod_unset)
+    assert c1.post("/v1/mode?mode=shadow").status_code == 503
+    assert c1.post("/v1/reset").status_code == 503
+    assert c1.get("/v1/spans").status_code == 503
+
+    # 2. Production with configured admin token -> 401 on missing/wrong, 200 on exact match
+    prod_set = create_app(
+        TraceOpsSettings(traceops_env="production", traceops_admin_token=SecretStr("prod-secret-999"))
+    )
+    c2 = TestClient(prod_set)
+    assert c2.post("/v1/mode?mode=shadow").status_code == 401
+    assert c2.post("/v1/mode?mode=shadow", headers={"X-TraceOps-Admin-Key": "wrong"}).status_code == 401
+    ok_resp = c2.post(
+        "/v1/mode?mode=shadow",
+        headers={"X-TraceOps-Admin-Key": "prod-secret-999"},
+    )
+    assert ok_resp.status_code == 200
+    assert ok_resp.json()["mode"] == "shadow"
+
+
+def test_bounded_trace_id_lru_and_ttl_eviction():
+    """Verify trace_id-scoped breaker store isolates traces and respects maxsize LRU eviction."""
+    from traceops.api import BoundedTraceBreakerStore
+    from traceops.config import TraceOpsSettings
+
+    store = BoundedTraceBreakerStore(TraceOpsSettings(), maxsize=2, ttl_seconds=1800)
+    b1 = store.get_breaker("trace-1")
+    b2 = store.get_breaker("trace-2")
+    assert b1 is not b2
+    assert store.size() == 2
+
+    # Adding trace-3 evicts trace-1
+    store.get_breaker("trace-3")
+    assert store.size() == 2
+    b1_new = store.get_breaker("trace-1")
+    assert b1_new is not b1
+
+
+def test_oversized_payload_rejected_413():
+    """Verify oversized POST payloads are rejected with HTTP 413."""
+    from fastapi.testclient import TestClient
+    from traceops.api import create_app
+    from traceops.config import TraceOpsSettings
+
+    app_small = create_app(TraceOpsSettings(max_request_bytes=1024))
+    client = TestClient(app_small)
+    resp = client.post(
+        "/v1/evaluate-step",
+        json={"tool_name": "fetch_pod_logs", "arguments": {"blob": "x" * 2048}},
+    )
+    assert resp.status_code == 413
+
+
+def test_mode_override_does_not_mutate_singleton():
+    """Verify per-call mode_override does not race-mutate CircuitBreaker.mode."""
+    breaker = CircuitBreaker(mode="enforce")
+    res = breaker.evaluate_step(
+        tool_name="delete_production_db",
+        arguments={},
+        mode_override="shadow",
+    )
+    assert res["mode"] == "shadow"
+    assert res["action_taken"] == "PROCEEDED"
+    assert breaker.mode == "enforce"
+
+
+def test_tier3_fail_open_on_otel_failure():
+    """Verify Tier 3 OTel/telemetry outage does not crash hot-path execution when fail_open=True."""
+    class BrokenEmitter:
+        def emit_decision_span(self, **kwargs):
+            raise RuntimeError("OTLP collector unreachable")
+
+    breaker = CircuitBreaker(
+        mode="enforce",
+        fail_open_tier3=True,
+        otel_emitter=BrokenEmitter(),  # type: ignore[arg-type]
+    )
+    res = breaker.evaluate_step(
+        tool_name="fetch_pod_logs",
+        arguments={"pod": "ok-1"},
+        step_context="investigate gke pod crash logs telemetry",
+        scenario="incident_triage",
+    )
+    assert res["decision"] in ("ALLOW", "WARN")
+    assert res["otel_span"].get("otel_error") == "suppressed_fail_open"

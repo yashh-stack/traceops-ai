@@ -1,53 +1,306 @@
 """
 Cloud Run-ready FastAPI Proxy for TraceOps AI.
-Provides high-performance synchronous evaluation endpoint: POST /v1/evaluate-step
-Latency budget: <15 ms synchronous response.
-Dispatches background OTLP spans and evals off the critical path.
+Hardened with:
+- Validated pydantic-settings configuration
+- Bounded LRU+TTL per-trace breaker state cache (maxsize=10000, ttl=1800s)
+- Fail-closed constant-time X-TraceOps-Admin-Key auth on /v1/mode, /v1/reset, /v1/spans
+- Restricted CORS origins, 64 KB payload size cap, per-IP rate limiting, sanitized 500s
 """
 from __future__ import annotations
-import os
+
+import logging
+import threading
 import time
-from typing import Any, Dict, List, Literal, Optional
-from fastapi import FastAPI, HTTPException, status, Request
-from fastapi.responses import JSONResponse
+from collections import OrderedDict
+from typing import Any, Dict, Literal, Optional, Tuple
+
+from fastapi import FastAPI, Header, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from traceops.circuit_breaker import CircuitBreaker, CircuitBreakerError
+from traceops.config import TraceOpsSettings, get_settings
 from traceops.otel_exporter import TraceOpsOtelEmitter
+from traceops.security import SlidingWindowRateLimiter, verify_admin_token
 
-# Global Circuit Breaker Singleton
-global_breaker = CircuitBreaker(
-    mode=os.getenv("TRACEOPS_MODE", "enforce"),  # type: ignore
-    max_identical_calls=int(os.getenv("MAX_IDENTICAL_CALLS", "3")),
-    max_cost_usd=float(os.getenv("MAX_COST_USD", "0.50")),
-    max_tokens=int(os.getenv("MAX_TOKENS", "25000")),
-    drift_threshold=float(os.getenv("DRIFT_THRESHOLD", "0.55")),
-)
+logger = logging.getLogger("traceops.api")
 
-app = FastAPI(
-    title="TraceOps AI - Deterministic Circuit-Breaker API",
-    description="Deterministic Agent Circuit-Breaker & Runtime Evals Engine (Google DeepMind x Cloud Startup Buildathon India 2026)",
-    version="1.0.0"
-)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+class BoundedTraceBreakerStore:
+    """
+    Thread-safe bounded LRU + TTL cache for per-trace CircuitBreaker contexts.
+    Prevents unbounded memory growth and cross-trace state pollution in containers.
+    """
+
+    def __init__(
+        self,
+        settings: TraceOpsSettings,
+        maxsize: int = 10000,
+        ttl_seconds: int = 1800,
+    ):
+        self.settings = settings
+        self.maxsize = maxsize
+        self.ttl_seconds = ttl_seconds
+        self.default_mode: Literal["shadow", "enforce"] = settings.traceops_mode
+        self._cache: OrderedDict[str, Tuple[CircuitBreaker, float]] = OrderedDict()
+        self._lock = threading.Lock()
+        self._default_breaker = self._new_breaker()
+
+    def _new_breaker(self) -> CircuitBreaker:
+        return CircuitBreaker(
+            mode=self.default_mode,
+            max_identical_calls=self.settings.max_identical_calls,
+            max_cost_usd=self.settings.max_cost_usd,
+            max_tokens=self.settings.max_tokens,
+            drift_threshold=self.settings.drift_threshold,
+            warn_threshold=self.settings.warn_threshold,
+            fail_open_tier3=self.settings.fail_open_tier3,
+        )
+
+    def _evict_expired(self, now: float) -> None:
+        while self._cache:
+            oldest_key, (_, ts) = next(iter(self._cache.items()))
+            if now - ts > self.ttl_seconds:
+                self._cache.popitem(last=False)
+            else:
+                break
+
+    def get_breaker(self, trace_id: Optional[str]) -> CircuitBreaker:
+        if not trace_id:
+            return self._default_breaker
+
+        now = time.monotonic()
+        with self._lock:
+            self._evict_expired(now)
+            entry = self._cache.get(trace_id)
+            if entry is not None:
+                breaker, _ = entry
+                self._cache.move_to_end(trace_id)
+                self._cache[trace_id] = (breaker, now)
+                return breaker
+
+            if len(self._cache) >= self.maxsize:
+                self._cache.popitem(last=False)
+
+            breaker = self._new_breaker()
+            self._cache[trace_id] = (breaker, now)
+            return breaker
+
+    def set_mode(self, mode: Literal["shadow", "enforce"]) -> None:
+        with self._lock:
+            self.default_mode = mode
+            self._default_breaker.set_mode(mode)
+            for breaker, _ in self._cache.values():
+                breaker.set_mode(mode)
+
+    def reset_all(self) -> None:
+        with self._lock:
+            self._cache.clear()
+            self._default_breaker.reset_trace()
+            self._default_breaker.total_simulated_usd_saved = 0.0
+
+    def size(self) -> int:
+        with self._lock:
+            self._evict_expired(time.monotonic())
+            return len(self._cache)
+
+
+_settings = get_settings()
+trace_store = BoundedTraceBreakerStore(
+    settings=_settings,
+    maxsize=_settings.trace_cache_maxsize,
+    ttl_seconds=_settings.trace_cache_ttl_seconds,
 )
+# Backward-compatible alias pointing at default breaker
+global_breaker = trace_store._default_breaker
+_rate_limiter = SlidingWindowRateLimiter(max_requests_per_minute=_settings.rate_limit_rpm)
+
+
+def create_app(settings: Optional[TraceOpsSettings] = None) -> FastAPI:
+    """Application factory supporting isolated security & settings tests."""
+    active_settings = settings or get_settings()
+    local_store = (
+        trace_store
+        if settings is None
+        else BoundedTraceBreakerStore(
+            settings=active_settings,
+            maxsize=active_settings.trace_cache_maxsize,
+            ttl_seconds=active_settings.trace_cache_ttl_seconds,
+        )
+    )
+    local_limiter = (
+        _rate_limiter
+        if settings is None
+        else SlidingWindowRateLimiter(max_requests_per_minute=active_settings.rate_limit_rpm)
+    )
+
+    application = FastAPI(
+        title="TraceOps AI - Deterministic Circuit-Breaker API",
+        description=(
+            "Deterministic Agent Circuit-Breaker & Runtime Evals Engine "
+            "(Google DeepMind x Cloud Startup Buildathon India 2026)"
+        ),
+        version="1.0.0",
+    )
+
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=active_settings.cors_origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type", "X-TraceOps-Admin-Key"],
+    )
+
+    @application.middleware("http")
+    async def enforce_payload_and_rate_limits(request: Request, call_next: Any) -> Any:
+        # 1. Request payload size cap (check header & stream body if needed)
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
+            try:
+                if int(content_length) > active_settings.max_request_bytes:
+                    max_b = active_settings.max_request_bytes
+                    return JSONResponse(
+                        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                        content={
+                            "error": "PAYLOAD_TOO_LARGE",
+                            "message": f"Request body exceeds {max_b} bytes limit.",
+                        },
+                    )
+            except ValueError:
+                return JSONResponse(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    content={"error": "INVALID_CONTENT_LENGTH", "message": "Invalid Content-Length header."},
+                )
+
+        if request.method in ("POST", "PUT", "PATCH"):
+            body = await request.body()
+            if len(body) > active_settings.max_request_bytes:
+                return JSONResponse(
+                    status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                    content={
+                        "error": "PAYLOAD_TOO_LARGE",
+                        "message": f"Request body exceeds {active_settings.max_request_bytes} bytes limit.",
+                    },
+                )
+
+        # 2. Per-IP sliding-window rate limit
+        client_ip = request.client.host if request.client else "unknown"
+        if not local_limiter.allow(client_ip):
+            return JSONResponse(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                content={"error": "RATE_LIMIT_EXCEEDED", "message": "Too many requests."},
+            )
+
+        return await call_next(request)
+
+    @application.exception_handler(Exception)
+    async def sanitized_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+        logger.exception("Unhandled API error on %s", request.url.path)
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"error": "INTERNAL_ERROR", "message": "An unexpected error occurred."},
+        )
+
+    def _require_admin(x_traceops_admin_key: Optional[str]) -> Optional[JSONResponse]:
+        ok, code, msg = verify_admin_token(x_traceops_admin_key, active_settings)
+        if not ok:
+            return JSONResponse(status_code=code, content={"error": "ADMIN_AUTH_REQUIRED", "message": msg})
+        return None
+
+    @application.get("/health", tags=["System"])
+    def health_check() -> Dict[str, Any]:
+        return {
+            "status": "HEALTHY",
+            "service": "traceops-ai",
+            "engine": "deterministic_circuit_breaker",
+            "mode": local_store.default_mode,
+            "hot_path_budget_ms": 15.0,
+            "active_trace_contexts": local_store.size(),
+        }
+
+    @application.post(
+        "/v1/evaluate-step",
+        response_model=EvaluateStepResponse,
+        tags=["Circuit Breaker"],
+    )
+    def evaluate_step(payload: EvaluateStepRequest) -> Any:
+        """
+        Synchronous hot-path evaluation endpoint (<15 ms).
+        Uses bounded trace_id context + non-mutating mode override.
+        """
+        breaker = local_store.get_breaker(payload.trace_id)
+        try:
+            return breaker.evaluate_step(
+                tool_name=payload.tool_name,
+                arguments=payload.arguments,
+                step_cost_usd=payload.step_cost_usd,
+                step_tokens=payload.step_tokens,
+                step_context=payload.step_context,
+                scenario=payload.scenario,
+                trace_id=payload.trace_id,
+                mode_override=payload.mode,
+            )
+        except CircuitBreakerError as e:
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={
+                    "error": "CIRCUIT_BREAKER_HALT",
+                    "message": e.message,
+                    **e.decision_record,
+                },
+            )
+
+    @application.get("/v1/spans", tags=["Observability"])
+    def get_recent_spans(
+        limit: int = 50,
+        x_traceops_admin_key: Optional[str] = Header(default=None, alias="X-TraceOps-Admin-Key"),
+    ) -> Any:
+        """Retrieve scrubbed OpenTelemetry spans (admin auth enforced in production / when configured)."""
+        auth_err = _require_admin(x_traceops_admin_key)
+        if auth_err is not None:
+            return auth_err
+        emitter = TraceOpsOtelEmitter.get_instance()
+        bounded_limit = max(1, min(limit, 500))
+        return {"spans": emitter.get_recent_spans(limit=bounded_limit)}
+
+    @application.post("/v1/mode", tags=["Configuration"])
+    def toggle_mode(
+        mode: Literal["shadow", "enforce"],
+        x_traceops_admin_key: Optional[str] = Header(default=None, alias="X-TraceOps-Admin-Key"),
+    ) -> Any:
+        """Toggle global circuit breaker execution mode (fail-closed admin auth)."""
+        auth_err = _require_admin(x_traceops_admin_key)
+        if auth_err is not None:
+            return auth_err
+        local_store.set_mode(mode)
+        return {"status": "SUCCESS", "mode": local_store.default_mode}
+
+    @application.post("/v1/reset", tags=["Configuration"])
+    def reset_breaker(
+        x_traceops_admin_key: Optional[str] = Header(default=None, alias="X-TraceOps-Admin-Key"),
+    ) -> Any:
+        """Reset all breaker state and OTel ring buffer (fail-closed admin auth)."""
+        auth_err = _require_admin(x_traceops_admin_key)
+        if auth_err is not None:
+            return auth_err
+        local_store.reset_all()
+        TraceOpsOtelEmitter.get_instance().clear()
+        return {"status": "SUCCESS", "message": "Circuit breaker state reset."}
+
+    return application
+
 
 class EvaluateStepRequest(BaseModel):
-    tool_name: str = Field(..., description="Name of the tool being executed by the agent")
+    tool_name: str = Field(..., min_length=1, max_length=128, description="Name of the tool being executed")
     arguments: Dict[str, Any] = Field(default_factory=dict, description="Input arguments payload")
     step_cost_usd: float = Field(0.0, ge=0.0, description="Estimated USD cost of the step")
     step_tokens: int = Field(0, ge=0, description="Tokens consumed in the step")
-    step_context: str = Field("", description="Natural language intent or context of the step")
-    scenario: str = Field("default", description="Agent domain scenario (e.g. incident_triage)")
-    trace_id: Optional[str] = Field(None, description="Correlating trace ID")
-    mode: Optional[Literal["shadow", "enforce"]] = Field(None, description="Override execution mode")
+    step_context: str = Field("", max_length=4096, description="Natural language intent or context")
+    scenario: str = Field("default", max_length=64, description="Agent domain scenario")
+    trace_id: Optional[str] = Field(None, max_length=128, description="Correlating trace ID")
+    mode: Optional[Literal["shadow", "enforce"]] = Field(None, description="Per-request mode override")
+
 
 class EvaluateStepResponse(BaseModel):
     trace_id: str
@@ -64,68 +317,5 @@ class EvaluateStepResponse(BaseModel):
     latency_ms: float
     otel_span: Dict[str, Any]
 
-@app.get("/health", tags=["System"])
-def health_check():
-    return {
-        "status": "HEALTHY",
-        "service": "traceops-ai",
-        "engine": "deterministic_circuit_breaker",
-        "mode": global_breaker.mode,
-        "hot_path_budget_ms": 15.0
-    }
 
-@app.post("/v1/evaluate-step", response_model=EvaluateStepResponse, tags=["Circuit Breaker"])
-def evaluate_step(payload: EvaluateStepRequest):
-    """
-    Synchronous hot-path evaluation endpoint (<15 ms).
-    Enforces deterministic safety invariants before tool execution.
-    """
-    # Temporarily set mode if per-request override provided
-    original_mode = global_breaker.mode
-    if payload.mode:
-        global_breaker.set_mode(payload.mode)
-
-    try:
-        result = global_breaker.evaluate_step(
-            tool_name=payload.tool_name,
-            arguments=payload.arguments,
-            step_cost_usd=payload.step_cost_usd,
-            step_tokens=payload.step_tokens,
-            step_context=payload.step_context,
-            scenario=payload.scenario,
-            trace_id=payload.trace_id
-        )
-        return result
-    except CircuitBreakerError as e:
-        # In enforce mode, a HALT returns HTTP 403 Forbidden with decision telemetry
-        return JSONResponse(
-            status_code=status.HTTP_403_FORBIDDEN,
-            content={
-                "error": "CIRCUIT_BREAKER_HALT",
-                "message": e.message,
-                **e.decision_record
-            }
-        )
-    finally:
-        if payload.mode:
-            global_breaker.set_mode(original_mode)
-
-@app.get("/v1/spans", tags=["Observability"])
-def get_recent_spans(limit: int = 50):
-    """Retrieve exported OpenTelemetry spans for observability and dashboard inspection."""
-    emitter = TraceOpsOtelEmitter.get_instance()
-    return {"spans": emitter.get_recent_spans(limit=limit)}
-
-@app.post("/v1/mode", tags=["Configuration"])
-def toggle_mode(mode: Literal["shadow", "enforce"]):
-    """Toggle global circuit breaker execution mode."""
-    global_breaker.set_mode(mode)
-    return {"status": "SUCCESS", "mode": global_breaker.mode}
-
-@app.post("/v1/reset", tags=["Configuration"])
-def reset_breaker():
-    """Reset the breaker state and history."""
-    global_breaker.reset_trace()
-    global_breaker.total_simulated_usd_saved = 0.0
-    TraceOpsOtelEmitter.get_instance().clear()
-    return {"status": "SUCCESS", "message": "Circuit breaker state reset."}
+app = create_app()

@@ -1,78 +1,62 @@
-﻿# PowerShell Deployment Script for TraceOps AI Engine on Google Cloud Run
-# Target: asia-south1 (Mumbai) | Standalone FastAPI Circuit-Breaker Engine
+﻿# PowerShell Deployment Script for TraceOps AI on Google Cloud Run
+# Target: asia-south1 (Mumbai) | Single-Container Streamlit HUD + FastAPI Engine
 
 $ErrorActionPreference = "Stop"
 
 $ProjectId = if ($env:GCP_PROJECT_ID) { $env:GCP_PROJECT_ID } else { "builder-cup-511710" }
 $Region = if ($env:GCP_REGION) { $env:GCP_REGION } else { "asia-south1" }
 $ServiceName = "traceops-ai-engine"
+$AdminToken = if ($env:TRACEOPS_ADMIN_TOKEN) { $env:TRACEOPS_ADMIN_TOKEN } else {
+    [Convert]::ToBase64String((1..24 | ForEach-Object { Get-Random -Minimum 0 -Maximum 256 })) -replace '[+/=]', ''
+}
 
 Write-Host "==========================================================" -ForegroundColor Cyan
-Write-Host "⚡ Deploying TraceOps AI Engine to Google Cloud Run" -ForegroundColor Cyan
-Write-Host "Project:  $ProjectId" -ForegroundColor Green
-Write-Host "Region:   $Region (Mumbai)" -ForegroundColor Green
-Write-Host "Service:  $ServiceName" -ForegroundColor Green
-Write-Host "Runtime:  FastAPI Proxy (Microsecond Synchronous Hot-Path)" -ForegroundColor Green
+Write-Host "⚡ Deploying TraceOps AI to Google Cloud Run" -ForegroundColor Cyan
+Write-Host "Project:  $ProjectId | Region: $Region | Service: $ServiceName" -ForegroundColor Green
+Write-Host "Runtime:  Streamlit HUD (8080) + Background FastAPI Proxy (8000)" -ForegroundColor Green
 Write-Host "=========================================================="
 
-# Check auth
-$auth = gcloud auth list --format="value(account)" 2>$null
+$auth = gcloud auth list --filter="status:ACTIVE" --format="value(account)" 2>$null
 if (-not $auth) {
     Write-Host "[!] No active gcloud account detected. Initiating interactive login..." -ForegroundColor Yellow
     gcloud auth login
 }
 
-# Set current project
 Write-Host "[1/3] Setting active GCP project to $ProjectId..." -ForegroundColor Cyan
 gcloud config set project $ProjectId
 
-# Deploy from source via Cloud Build
-Write-Host "[2/3] Building and deploying container to Cloud Run..." -ForegroundColor Cyan
+Write-Host "[2/3] Deploying canary revision (--no-traffic) via Cloud Build..." -ForegroundColor Cyan
 gcloud run deploy $ServiceName `
     --source . `
     --project $ProjectId `
     --region $Region `
     --platform managed `
     --allow-unauthenticated `
+    --no-traffic `
+    --tag canary `
     --memory 1Gi `
     --cpu 1 `
     --min-instances 0 `
     --max-instances 2 `
     --concurrency 80 `
     --timeout 30 `
-    --set-env-vars="TRACEOPS_MODE=enforce,MAX_IDENTICAL_CALLS=3,MAX_COST_USD=0.50,DRIFT_THRESHOLD=0.55,GEMINI_JUDGE_MODEL=gemini-3.5-flash-lite,GEMINI_BASELINE_MODEL=gemini-3.8-flash"
+    --set-env-vars="TRACEOPS_ENV=production,TRACEOPS_MODE=enforce,MAX_IDENTICAL_CALLS=3,MAX_COST_USD=0.50,DRIFT_THRESHOLD=0.55,GEMINI_JUDGE_MODEL=gemini-3.5-flash-lite,GEMINI_BASELINE_MODEL=gemini-3.8-flash,TRACEOPS_ADMIN_TOKEN=$AdminToken"
 
-# Retrieve live URL
-Write-Host "[3/3] Fetching live Service URL..." -ForegroundColor Cyan
+$CanaryUrl = (gcloud run services describe $ServiceName --platform managed --region $Region --format "value(status.traffic[?tag=='canary'].url)").Trim()
+if (-not $CanaryUrl) {
+    $CanaryUrl = (gcloud run services describe $ServiceName --platform managed --region $Region --format "value(status.url)").Trim()
+}
+
+Write-Host "[3/3] Smoke testing canary ($CanaryUrl/_stcore/health) & promoting traffic..." -ForegroundColor Cyan
+$hc = Invoke-WebRequest -Uri "$CanaryUrl/_stcore/health" -UseBasicParsing -TimeoutSec 20
+if ($hc.StatusCode -ne 200) {
+    throw "Canary health check failed with status $($hc.StatusCode)"
+}
+
+gcloud run services update-traffic $ServiceName --region $Region --project $ProjectId --to-latest | Out-Null
 $ServiceUrl = (gcloud run services describe $ServiceName --platform managed --region $Region --format "value(status.url)").Trim()
 
 Write-Host "==========================================================" -ForegroundColor Green
-Write-Host "✅ Deployment Succeeded!" -ForegroundColor Green
+Write-Host "✅ Deployment Live & Verified!" -ForegroundColor Green
 Write-Host "Live URL: $ServiceUrl" -ForegroundColor Yellow
 Write-Host "==========================================================" -ForegroundColor Green
-
-# Automated Smoke Test
-Write-Host "`nRunning Live Smoke Test against $ServiceUrl..." -ForegroundColor Cyan
-Invoke-RestMethod -Uri "$ServiceUrl/health" -Method Get | ConvertTo-Json -Depth 3
-
-Write-Host "`nTesting Normal Tool Execution (fetch_pod_logs)..." -ForegroundColor Cyan
-$payloadAllow = @{
-    tool_name = "fetch_pod_logs"
-    arguments = @{ pod = "auth-service-7f4c" }
-} | ConvertTo-Json
-$res1 = Invoke-RestMethod -Uri "$ServiceUrl/v1/evaluate-step" -Method Post -Body $payloadAllow -ContentType "application/json"
-$res1 | ConvertTo-Json -Depth 3
-
-Write-Host "`nTesting Unauthorized Tool Interception (delete_production_db)..." -ForegroundColor Cyan
-$payloadBlock = @{
-    tool_name = "delete_production_db"
-    arguments = @{ force = $true }
-} | ConvertTo-Json
-try {
-    $res2 = Invoke-RestMethod -Uri "$ServiceUrl/v1/evaluate-step" -Method Post -Body $payloadBlock -ContentType "application/json"
-    $res2 | ConvertTo-Json -Depth 3
-} catch {
-    Write-Host "Expected Interception: $($_.Exception.Message)" -ForegroundColor Red
-}
-
-Write-Host "`nAll verification checks complete!" -ForegroundColor Green

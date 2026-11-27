@@ -4,10 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "traceops-ai"
-version = "0.1.0"
+version = "0.2.0"
 description = "Deterministic Agent Circuit-Breaker & Runtime Evals Engine"
 readme = "README.md"
 requires-python = ">=3.11"
+license = "Apache-2.0"
 authors = [
     { name = "TraceOps AI Team" }
 ]
@@ -28,7 +29,11 @@ dependencies = [
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
-    "httpx>=0.26.0"
+    "httpx>=0.28.0",
+    "ruff>=0.9.0",
+    "mypy>=1.15.0",
+    "bandit>=1.8.0",
+    "pip-audit>=2.8.0"
 ]
 dashboard = [
     "streamlit>=1.35.0"
@@ -38,3 +43,24 @@ dashboard = [
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "-p no:langsmith_plugin"
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "B", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]
+"traceops/state_machine.py" = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+warn_unused_ignores = true
+check_untyped_defs = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["traceops*"]
