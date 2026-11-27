@@ -1,0 +1,171 @@
+name: TraceOps AI — Automated CI/CD to Google Cloud Run
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+    inputs:
+      region:
+        description: "Google Cloud Run region"
+        required: false
+        default: "asia-south1"
+      service_name:
+        description: "Cloud Run service name"
+        required: false
+        default: "traceops-ai-engine"
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  SERVICE_NAME: ${{ inputs.service_name || vars.GCP_CLOUD_RUN_SERVICE || 'traceops-ai-engine' }}
+  REGION: ${{ inputs.region || vars.GCP_REGION || 'asia-south1' }}
+
+jobs:
+  verify:
+    name: Security, Type, Unit & Latency Gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install package with dev + dashboard deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,dashboard]"
+
+      - name: Ruff Lint & SAST (S,B,E,F)
+        run: ruff check traceops tests --select S,B,E,F
+
+      - name: Mypy Static Typing
+        run: mypy traceops
+
+      - name: Bandit Security Scan
+        run: bandit -r traceops -ll
+
+      - name: Dependency Supply-Chain Audit
+        run: pip-audit -r requirements.txt
+
+      - name: Pytest & Hot-Path p95 Latency Gate (< 15.0 ms)
+        run: |
+          pytest -v
+          python scripts/run_benchmark.py
+          python -c "import json, sys; d=json.load(open('benchmark_report.json')); p95=d.get('p95_ms', 999); print(f'Verified p95={p95} ms'); sys.exit(0 if p95 < 15.0 else 1)"
+
+  deploy-cloud-run:
+    name: Canary Build, Smoke Test & Traffic Promotion
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      HAS_WIF: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER != '' && secrets.GCP_SERVICE_ACCOUNT != '' }}
+      HAS_KEY: ${{ secrets.GCP_SA_KEY != '' }}
+      PROJECT_ID: ${{ secrets.GCP_PROJECT_ID || vars.GCP_PROJECT_ID || 'builder-cup-511710' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check GCP Credentials Configuration
+        id: check_auth
+        run: |
+          if [ "${{ env.HAS_WIF }}" = "true" ] || [ "${{ env.HAS_KEY }}" = "true" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::GCP CI/CD secrets not linked yet. Run scripts/setup_gcp_github_cd.ps1 (or .sh) once to bind Workload Identity Federation."
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+              echo "::error::Cannot execute manual Cloud Run deploy without GCP_WORKLOAD_IDENTITY_PROVIDER/GCP_SERVICE_ACCOUNT or GCP_SA_KEY secrets."
+              exit 1
+            fi
+          fi
+
+      - name: Authenticate to Google Cloud (Workload Identity Federation)
+        if: steps.check_auth.outputs.configured == 'true' && env.HAS_WIF == 'true'
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Authenticate to Google Cloud (Service Account Key Fallback)
+        if: steps.check_auth.outputs.configured == 'true' && env.HAS_WIF != 'true' && env.HAS_KEY == 'true'
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        if: steps.check_auth.outputs.configured == 'true'
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker Artifact Registry Auth
+        if: steps.check_auth.outputs.configured == 'true'
+        run: gcloud auth configure-docker "${{ env.REGION }}-docker.pkg.dev" --quiet
+
+      - name: Build & Push Hardened Container Image
+        if: steps.check_auth.outputs.configured == 'true'
+        id: build
+        run: |
+          IMAGE="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/traceops-repo/${{ env.SERVICE_NAME }}:${{ github.sha }}"
+          gcloud artifacts repositories describe traceops-repo --location="${{ env.REGION }}" --project="${{ env.PROJECT_ID }}" >/dev/null 2>&1 || \
+            gcloud artifacts repositories create traceops-repo --repository-format=docker --location="${{ env.REGION }}" --project="${{ env.PROJECT_ID }}"
+          gcloud builds submit --tag "${IMAGE}" --project "${{ env.PROJECT_ID }}" .
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy Canary Revision (--no-traffic)
+        if: steps.check_auth.outputs.configured == 'true'
+        run: |
+          ADMIN_TOKEN="${{ secrets.TRACEOPS_ADMIN_TOKEN }}"
+          if [ -z "${ADMIN_TOKEN}" ]; then
+            ADMIN_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+          fi
+          gcloud run deploy "${{ env.SERVICE_NAME }}" \
+            --image "${{ steps.build.outputs.image }}" \
+            --project "${{ env.PROJECT_ID }}" \
+            --region "${{ env.REGION }}" \
+            --platform managed \
+            --allow-unauthenticated \
+            --no-traffic \
+            --tag canary \
+            --memory 1Gi \
+            --cpu 1 \
+            --min-instances 0 \
+            --max-instances 2 \
+            --concurrency 80 \
+            --timeout 30 \
+            --set-env-vars="TRACEOPS_ENV=production,TRACEOPS_MODE=enforce,MAX_IDENTICAL_CALLS=3,MAX_COST_USD=0.50,DRIFT_THRESHOLD=0.55,GEMINI_JUDGE_MODEL=gemini-3.5-flash-lite,GEMINI_BASELINE_MODEL=gemini-3.8-flash,TRACEOPS_ADMIN_TOKEN=${ADMIN_TOKEN},GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}"
+
+      - name: Smoke Test Canary Streamlit & FastAPI Health
+        if: steps.check_auth.outputs.configured == 'true'
+        id: smoke
+        run: |
+          CANARY_URL=$(gcloud run services describe "${{ env.SERVICE_NAME }}" --region "${{ env.REGION }}" --project "${{ env.PROJECT_ID }}" --format='value(status.traffic[?tag=="canary"].url)')
+          if [ -z "${CANARY_URL}" ]; then
+            CANARY_URL=$(gcloud run services describe "${{ env.SERVICE_NAME }}" --region "${{ env.REGION }}" --project "${{ env.PROJECT_ID }}" --format='value(status.url)')
+          fi
+          echo "Testing canary URL: ${CANARY_URL}"
+          for i in $(seq 1 12); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${CANARY_URL}/_stcore/health" || true)
+            if [ "${STATUS}" = "200" ]; then
+              echo "Canary health check passed (HTTP 200)!"
+              echo "url=${CANARY_URL}" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::Canary health check failed (last HTTP ${STATUS})"
+          exit 1
+
+      - name: Promote Canary Revision to 100% Production Traffic
+        if: steps.check_auth.outputs.configured == 'true'
+        run: |
+          gcloud run services update-traffic "${{ env.SERVICE_NAME }}" \
+            --region "${{ env.REGION }}" \
+            --project "${{ env.PROJECT_ID }}" \
+            --to-latest
+          PROD_URL=$(gcloud run services describe "${{ env.SERVICE_NAME }}" --region "${{ env.REGION }}" --project "${{ env.PROJECT_ID }}" --format='value(status.url)')
+          echo "PRODUCTION_LIVE_URL=${PROD_URL}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Live Cloud Run Service URL: ${PROD_URL}"
