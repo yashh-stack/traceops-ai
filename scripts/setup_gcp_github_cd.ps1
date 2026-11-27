@@ -79,6 +79,7 @@ foreach ($role in @("roles/run.admin", "roles/artifactregistry.writer", "roles/c
         --role="$role" `
         --condition=None `
         --quiet | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Failed to bind IAM role $role to $SaEmail" }
 }
 
 # Workload Identity Pool & OIDC Provider restricted strictly to yashh-stack/traceops-ai
