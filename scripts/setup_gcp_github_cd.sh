@@ -32,6 +32,9 @@ gcloud services enable \
   secretmanager.googleapis.com \
   --project="${PROJECT_ID}"
 
+gcloud artifacts repositories describe traceops-repo --location="${REGION}" --project="${PROJECT_ID}" >/dev/null 2>&1 || \
+  gcloud artifacts repositories create traceops-repo --repository-format=docker --location="${REGION}" --project="${PROJECT_ID}" --description="TraceOps AI Cloud Run containers"
+
 PROJECT_NUMBER="$(gcloud projects describe "${PROJECT_ID}" --format='value(projectNumber)')"
 
 gcloud iam service-accounts describe "${SA_EMAIL}" --project="${PROJECT_ID}" >/dev/null 2>&1 || \

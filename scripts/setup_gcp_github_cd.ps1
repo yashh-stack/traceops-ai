@@ -58,6 +58,12 @@ gcloud services enable `
     secretmanager.googleapis.com `
     --project $ProjectId
 
+# Pre-create Artifact Registry repository so deployer SA only needs minimal writer role
+gcloud artifacts repositories describe traceops-repo --location=$Region --project=$ProjectId 2>$null | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    gcloud artifacts repositories create traceops-repo --repository-format=docker --location=$Region --project=$ProjectId --description="TraceOps AI Cloud Run containers"
+}
+
 # 4. Provision least-privilege deployer Service Account + IAM roles
 Write-Host "[3/6] Provisioning Service Account & Workload Identity Federation..." -ForegroundColor Cyan
 $ProjectNumber = (gcloud projects describe $ProjectId --format="value(projectNumber)").Trim()

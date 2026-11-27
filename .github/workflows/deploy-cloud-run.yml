@@ -110,9 +110,8 @@ jobs:
         id: build
         run: |
           IMAGE="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/traceops-repo/${{ env.SERVICE_NAME }}:${{ github.sha }}"
-          gcloud artifacts repositories describe traceops-repo --location="${{ env.REGION }}" --project="${{ env.PROJECT_ID }}" >/dev/null 2>&1 || \
-            gcloud artifacts repositories create traceops-repo --repository-format=docker --location="${{ env.REGION }}" --project="${{ env.PROJECT_ID }}"
-          gcloud builds submit --tag "${IMAGE}" --project "${{ env.PROJECT_ID }}" .
+          docker build -t "${IMAGE}" .
+          docker push "${IMAGE}"
           echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
 
       - name: Deploy Canary Revision (--no-traffic)
