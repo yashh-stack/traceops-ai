@@ -19,3 +19,10 @@ service_account*.json
 .antigravity/secrets*
 .antigravity/logs*
 .antigravity/*.json
+*.egg-info/
+build/
+dist/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
