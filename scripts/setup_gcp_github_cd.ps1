@@ -1,7 +1,7 @@
 ﻿# One-Shot Bootstrap: Connect Google Cloud (Workload Identity Federation) + GitHub Actions CD
 # Automates end-to-end zero-key CI/CD + initial Cloud Run deployment for TraceOps AI.
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 
 $ProjectId = if ($env:GCP_PROJECT_ID) { $env:GCP_PROJECT_ID } else { "builder-cup-511710" }
 $Region = if ($env:GCP_REGION) { $env:GCP_REGION } else { "asia-south1" }
@@ -20,12 +20,14 @@ Write-Host "Project: $ProjectId | Region: $Region | Repo: $RepoFull" -Foreground
 Write-Host "=========================================================="
 
 # 1. Authenticate gcloud interactively if needed
-$acct = (gcloud auth list --filter="status:ACTIVE" --format="value(account)" 2>$null | Out-String).Trim()
+$acct = (cmd /c "gcloud auth list --format=value(account) 2>nul" | Out-String).Trim()
 if (-not $acct) {
     Write-Host "[1/6] Launching browser login for Google Cloud..." -ForegroundColor Yellow
     gcloud auth login
+    if ($LASTEXITCODE -ne 0) { throw "gcloud auth login failed or was cancelled." }
 }
 gcloud config set project $ProjectId
+if ($LASTEXITCODE -ne 0) { throw "Failed to set GCP project $ProjectId." }
 
 # 2. Authenticate GitHub CLI (reuse existing git credential helper token if available)
 $ghToken = $env:GH_TOKEN

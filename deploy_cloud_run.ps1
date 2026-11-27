@@ -1,7 +1,7 @@
 ﻿# PowerShell Deployment Script for TraceOps AI on Google Cloud Run
 # Target: asia-south1 (Mumbai) | Single-Container Streamlit HUD + FastAPI Engine
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 
 $ProjectId = if ($env:GCP_PROJECT_ID) { $env:GCP_PROJECT_ID } else { "builder-cup-511710" }
 $Region = if ($env:GCP_REGION) { $env:GCP_REGION } else { "asia-south1" }
@@ -16,10 +16,11 @@ Write-Host "Project:  $ProjectId | Region: $Region | Service: $ServiceName" -For
 Write-Host "Runtime:  Streamlit HUD (8080) + Background FastAPI Proxy (8000)" -ForegroundColor Green
 Write-Host "=========================================================="
 
-$auth = gcloud auth list --filter="status:ACTIVE" --format="value(account)" 2>$null
+$auth = (cmd /c "gcloud auth list --format=value(account) 2>nul" | Out-String).Trim()
 if (-not $auth) {
     Write-Host "[!] No active gcloud account detected. Initiating interactive login..." -ForegroundColor Yellow
     gcloud auth login
+    if ($LASTEXITCODE -ne 0) { throw "gcloud auth login failed." }
 }
 
 Write-Host "[1/3] Setting active GCP project to $ProjectId..." -ForegroundColor Cyan
