@@ -8,7 +8,7 @@ version = "0.2.0"
 description = "Deterministic Agent Circuit-Breaker & Runtime Evals Engine"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
 authors = [
     { name = "TraceOps AI Team" }
 ]
@@ -60,3 +60,7 @@ python_version = "3.12"
 ignore_missing_imports = true
 warn_unused_ignores = true
 check_untyped_defs = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["traceops*"]
