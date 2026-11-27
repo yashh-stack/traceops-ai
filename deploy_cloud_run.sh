@@ -14,15 +14,19 @@ echo "=========================================================="
 
 gcloud config set project "${PROJECT_ID}"
 
-echo "[1/3] Deploying canary revision (--no-traffic) via Cloud Build..."
+echo "[1/3] Deploying revision via Cloud Build (canary --no-traffic if service exists)..."
+TRAFFIC_FLAGS=""
+if gcloud run services describe "${SERVICE_NAME}" --platform managed --region "${REGION}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
+    TRAFFIC_FLAGS="--no-traffic --tag canary"
+fi
+
 gcloud run deploy "${SERVICE_NAME}" \
     --source . \
     --project "${PROJECT_ID}" \
     --region "${REGION}" \
     --platform managed \
     --allow-unauthenticated \
-    --no-traffic \
-    --tag canary \
+    ${TRAFFIC_FLAGS} \
     --memory 1Gi \
     --cpu 1 \
     --min-instances 0 \

@@ -114,12 +114,16 @@ jobs:
           docker push "${IMAGE}"
           echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
 
-      - name: Deploy Canary Revision (--no-traffic)
+      - name: Deploy Canary Revision (--no-traffic when service exists)
         if: steps.check_auth.outputs.configured == 'true'
         run: |
           ADMIN_TOKEN="${{ secrets.TRACEOPS_ADMIN_TOKEN }}"
           if [ -z "${ADMIN_TOKEN}" ]; then
             ADMIN_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+          fi
+          TRAFFIC_FLAGS=""
+          if gcloud run services describe "${{ env.SERVICE_NAME }}" --region "${{ env.REGION }}" --project "${{ env.PROJECT_ID }}" >/dev/null 2>&1; then
+            TRAFFIC_FLAGS="--no-traffic --tag canary"
           fi
           gcloud run deploy "${{ env.SERVICE_NAME }}" \
             --image "${{ steps.build.outputs.image }}" \
@@ -127,8 +131,7 @@ jobs:
             --region "${{ env.REGION }}" \
             --platform managed \
             --allow-unauthenticated \
-            --no-traffic \
-            --tag canary \
+            ${TRAFFIC_FLAGS} \
             --memory 1Gi \
             --cpu 1 \
             --min-instances 0 \

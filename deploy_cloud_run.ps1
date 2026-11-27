@@ -26,22 +26,30 @@ if (-not $auth) {
 Write-Host "[1/3] Setting active GCP project to $ProjectId..." -ForegroundColor Cyan
 gcloud config set project $ProjectId
 
-Write-Host "[2/3] Deploying canary revision (--no-traffic) via Cloud Build..." -ForegroundColor Cyan
-gcloud run deploy $ServiceName `
-    --source . `
-    --project $ProjectId `
-    --region $Region `
-    --platform managed `
-    --allow-unauthenticated `
-    --no-traffic `
-    --tag canary `
-    --memory 1Gi `
-    --cpu 1 `
-    --min-instances 0 `
-    --max-instances 2 `
-    --concurrency 80 `
-    --timeout 30 `
-    --set-env-vars="TRACEOPS_ENV=production,TRACEOPS_MODE=enforce,MAX_IDENTICAL_CALLS=3,MAX_COST_USD=0.50,DRIFT_THRESHOLD=0.55,GEMINI_JUDGE_MODEL=gemini-3.5-flash-lite,GEMINI_BASELINE_MODEL=gemini-3.8-flash,TRACEOPS_ADMIN_TOKEN=$AdminToken"
+Write-Host "[2/3] Deploying revision via Cloud Build (canary --no-traffic if service exists)..." -ForegroundColor Cyan
+$svcExists = $false
+cmd /c "gcloud run services describe $ServiceName --platform managed --region $Region --project $ProjectId >nul 2>nul"
+if ($LASTEXITCODE -eq 0) { $svcExists = $true }
+
+$deployArgs = @(
+    "run", "deploy", $ServiceName,
+    "--source", ".",
+    "--project", $ProjectId,
+    "--region", $Region,
+    "--platform", "managed",
+    "--allow-unauthenticated",
+    "--memory", "1Gi",
+    "--cpu", "1",
+    "--min-instances", "0",
+    "--max-instances", "2",
+    "--concurrency", "80",
+    "--timeout", "30",
+    "--set-env-vars=TRACEOPS_ENV=production,TRACEOPS_MODE=enforce,MAX_IDENTICAL_CALLS=3,MAX_COST_USD=0.50,DRIFT_THRESHOLD=0.55,GEMINI_JUDGE_MODEL=gemini-3.5-flash-lite,GEMINI_BASELINE_MODEL=gemini-3.8-flash,TRACEOPS_ADMIN_TOKEN=$AdminToken"
+)
+if ($svcExists) {
+    $deployArgs += @("--no-traffic", "--tag", "canary")
+}
+& gcloud @deployArgs
 
 $CanaryUrl = (gcloud run services describe $ServiceName --platform managed --region $Region --format "value(status.traffic[?tag=='canary'].url)").Trim()
 if (-not $CanaryUrl) {
