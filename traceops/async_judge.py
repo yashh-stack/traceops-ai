@@ -38,7 +38,11 @@ class AsyncJudge:
         output_jsonl_path: str = "data/deepeval_regression_cases.jsonl"
     ):
         settings = get_settings()
-        self.api_key = api_key if api_key is not None else settings.gemini_api_key.get_secret_value()
+        configured_key = api_key if api_key is not None else settings.gemini_api_key.get_secret_value()
+        # Fall back to GEMINI_API_KEY or GOOGLE_API_KEY in environment
+        if not configured_key:
+            configured_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or ""
+        self.api_key = configured_key
         self.model_name = model_name or settings.gemini_judge_model
         self.output_jsonl_path = output_jsonl_path
         self.client = None

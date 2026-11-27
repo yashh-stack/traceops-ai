@@ -98,7 +98,39 @@ class TraceOpsOtelEmitter:
         )
         self.tracer_provider = TracerProvider()
         self.tracer_provider.add_span_processor(self.span_processor)
+
+        # Wire external OTLP / Cloud Trace exporter if configured
+        if settings.enable_cloud_trace or settings.otel_exporter_otlp_endpoint:
+            self._setup_cloud_trace_exporter(settings)
+
         self.tracer = self.tracer_provider.get_tracer("traceops.circuit_breaker", "0.2.0")
+
+    def _setup_cloud_trace_exporter(self, settings: Any) -> None:
+        """
+        Configure secondary non-blocking BatchSpanProcessor targeting Cloud Trace or OTLP endpoint.
+        Gracefully fails open if collector is unreachable.
+        """
+        try:
+            from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+            endpoint = settings.otel_exporter_otlp_endpoint or "http://localhost:4318/v1/traces"
+            otlp_exporter = OTLPSpanExporter(
+                endpoint=endpoint,
+                timeout=int(settings.otel_export_timeout_ms / 1000) or 1,
+            )
+            otlp_processor = BatchSpanProcessor(
+                otlp_exporter,
+                max_queue_size=self.max_queue_size,
+                schedule_delay_millis=500,
+                export_timeout_millis=self.export_timeout_millis,
+                max_export_batch_size=min(128, self.max_queue_size),
+            )
+            self.tracer_provider.add_span_processor(otlp_processor)
+            logger.info("External OTLP/Cloud Trace exporter wired to %s", endpoint)
+        except Exception as exc:
+            logger.warning(
+                "Could not initialize external OTLP exporter (%s); using in-memory ring buffer.",
+                exc,
+            )
 
     @classmethod
     def get_instance(cls) -> TraceOpsOtelEmitter:

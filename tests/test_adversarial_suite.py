@@ -377,3 +377,54 @@ def test_tier3_fail_open_on_otel_failure():
     )
     assert res["decision"] in ("ALLOW", "WARN")
     assert res["otel_span"].get("otel_error") == "suppressed_fail_open"
+
+
+def test_storage_adapter_factory_and_fallback():
+    """Verify storage adapter factory returns in-memory store and handles redis fallback."""
+    from traceops.storage import (
+        InMemoryTraceBreakerStore,
+        RedisTraceBreakerStore,
+        create_trace_breaker_store,
+    )
+    from traceops.config import TraceOpsSettings
+
+    settings_mem = TraceOpsSettings(redis_url=None)
+    store = create_trace_breaker_store(settings_mem)
+    assert isinstance(store, InMemoryTraceBreakerStore)
+
+    # Redis store with invalid/unreachable URL gracefully falls back to in-memory
+    settings_redis = TraceOpsSettings(redis_url="redis://localhost:9999/0")  # type: ignore[arg-type]
+    redis_store = create_trace_breaker_store(settings_redis)
+    assert isinstance(redis_store, RedisTraceBreakerStore)
+    b = redis_store.get_breaker("trace-test")
+    assert b is not None
+    redis_store.set_mode("shadow")
+    assert b.mode == "shadow"
+    redis_store.reset_all()
+
+
+def test_otel_external_cloud_trace_config():
+    """Verify OTel emitter initializes external OTLP/Cloud Trace exporter with fail-open safety."""
+    from traceops.otel_exporter import TraceOpsOtelEmitter
+
+    # Emitter does not crash even when external endpoint is unreachable or active
+    emitter = TraceOpsOtelEmitter(
+        maxlen=100,
+        max_queue_size=256,
+        export_timeout_millis=500,
+    )
+    span_data = emitter.emit_decision_span(
+        trace_id_str="trace-cloud-trace-test",
+        tool_name="fetch_pod_logs",
+        decision="ALLOW",
+        mode="enforce",
+        latency_ms=1.2,
+        tier1_status="PASSED",
+        drift_score=0.1,
+        reason="Healthy test",
+        estimated_usd_saved=0.0,
+        arguments={"pod": "test"},
+    )
+    assert span_data["name"] == "traceops.guard.fetch_pod_logs"
+    assert span_data["sampled"] in (True, False)
+

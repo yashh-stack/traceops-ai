@@ -9,111 +9,41 @@ Hardened with:
 from __future__ import annotations
 
 import logging
-import threading
-import time
-from collections import OrderedDict
-from typing import Any, Dict, Literal, Optional, Tuple
+from typing import Any, Dict, Literal, Optional
 
 from fastapi import FastAPI, Header, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from traceops.circuit_breaker import CircuitBreaker, CircuitBreakerError
+from traceops.circuit_breaker import CircuitBreakerError
 from traceops.config import TraceOpsSettings, get_settings
 from traceops.otel_exporter import TraceOpsOtelEmitter
 from traceops.security import SlidingWindowRateLimiter, verify_admin_token
+from traceops.storage import (
+    BaseTraceBreakerStore,
+    BoundedTraceBreakerStore,
+    InMemoryTraceBreakerStore,
+    create_trace_breaker_store,
+)
+
+__all__ = [
+    "app",
+    "create_app",
+    "BoundedTraceBreakerStore",
+    "InMemoryTraceBreakerStore",
+    "BaseTraceBreakerStore",
+    "create_trace_breaker_store",
+]
 
 logger = logging.getLogger("traceops.api")
 
 
-class BoundedTraceBreakerStore:
-    """
-    Thread-safe bounded LRU + TTL cache for per-trace CircuitBreaker contexts.
-    Prevents unbounded memory growth and cross-trace state pollution in containers.
-    """
-
-    def __init__(
-        self,
-        settings: TraceOpsSettings,
-        maxsize: int = 10000,
-        ttl_seconds: int = 1800,
-    ):
-        self.settings = settings
-        self.maxsize = maxsize
-        self.ttl_seconds = ttl_seconds
-        self.default_mode: Literal["shadow", "enforce"] = settings.traceops_mode
-        self._cache: OrderedDict[str, Tuple[CircuitBreaker, float]] = OrderedDict()
-        self._lock = threading.Lock()
-        self._default_breaker = self._new_breaker()
-
-    def _new_breaker(self) -> CircuitBreaker:
-        return CircuitBreaker(
-            mode=self.default_mode,
-            max_identical_calls=self.settings.max_identical_calls,
-            max_cost_usd=self.settings.max_cost_usd,
-            max_tokens=self.settings.max_tokens,
-            drift_threshold=self.settings.drift_threshold,
-            warn_threshold=self.settings.warn_threshold,
-            fail_open_tier3=self.settings.fail_open_tier3,
-        )
-
-    def _evict_expired(self, now: float) -> None:
-        while self._cache:
-            oldest_key, (_, ts) = next(iter(self._cache.items()))
-            if now - ts > self.ttl_seconds:
-                self._cache.popitem(last=False)
-            else:
-                break
-
-    def get_breaker(self, trace_id: Optional[str]) -> CircuitBreaker:
-        if not trace_id:
-            return self._default_breaker
-
-        now = time.monotonic()
-        with self._lock:
-            self._evict_expired(now)
-            entry = self._cache.get(trace_id)
-            if entry is not None:
-                breaker, _ = entry
-                self._cache.move_to_end(trace_id)
-                self._cache[trace_id] = (breaker, now)
-                return breaker
-
-            if len(self._cache) >= self.maxsize:
-                self._cache.popitem(last=False)
-
-            breaker = self._new_breaker()
-            self._cache[trace_id] = (breaker, now)
-            return breaker
-
-    def set_mode(self, mode: Literal["shadow", "enforce"]) -> None:
-        with self._lock:
-            self.default_mode = mode
-            self._default_breaker.set_mode(mode)
-            for breaker, _ in self._cache.values():
-                breaker.set_mode(mode)
-
-    def reset_all(self) -> None:
-        with self._lock:
-            self._cache.clear()
-            self._default_breaker.reset_trace()
-            self._default_breaker.total_simulated_usd_saved = 0.0
-
-    def size(self) -> int:
-        with self._lock:
-            self._evict_expired(time.monotonic())
-            return len(self._cache)
-
 
 _settings = get_settings()
-trace_store = BoundedTraceBreakerStore(
-    settings=_settings,
-    maxsize=_settings.trace_cache_maxsize,
-    ttl_seconds=_settings.trace_cache_ttl_seconds,
-)
+trace_store = create_trace_breaker_store(_settings)
 # Backward-compatible alias pointing at default breaker
-global_breaker = trace_store._default_breaker
+global_breaker = trace_store.get_breaker(None)
 _rate_limiter = SlidingWindowRateLimiter(max_requests_per_minute=_settings.rate_limit_rpm)
 
 
@@ -123,11 +53,7 @@ def create_app(settings: Optional[TraceOpsSettings] = None) -> FastAPI:
     local_store = (
         trace_store
         if settings is None
-        else BoundedTraceBreakerStore(
-            settings=active_settings,
-            maxsize=active_settings.trace_cache_maxsize,
-            ttl_seconds=active_settings.trace_cache_ttl_seconds,
-        )
+        else create_trace_breaker_store(active_settings)
     )
     local_limiter = (
         _rate_limiter

@@ -74,6 +74,18 @@ class TraceOpsSettings(BaseSettings):
     gemini_judge_model: str = Field(default="gemini-3.5-flash-lite")
     gemini_baseline_model: str = Field(default="gemini-3.8-flash")
     database_url: SecretStr = Field(default=SecretStr(""))
+    redis_url: Optional[SecretStr] = Field(
+        default=None,
+        description="Optional Redis URL for distributed multi-instance Cloud Run scaling.",
+    )
+    otel_exporter_otlp_endpoint: Optional[str] = Field(
+        default=None,
+        description="Optional OTLP HTTP/gRPC collector endpoint (e.g., Cloud Trace OTLP collector).",
+    )
+    enable_cloud_trace: bool = Field(
+        default=False,
+        description="Enable export to Google Cloud Trace / OTLP HTTP collector if endpoint configured.",
+    )
 
 
 @lru_cache(maxsize=1)
