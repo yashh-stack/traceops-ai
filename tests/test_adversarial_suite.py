@@ -35,7 +35,7 @@ def test_tier1_runaway_loop_caught_under_1ms():
     tool = "query_gke_telemetry"
     args = {"cluster": "prod-india", "metric": "cpu_utilization"}
 
-    # Call 1 & 2 pass
+    # Warm-up call to avoid initial python module/bytecode latency on cold run
     guard.evaluate_tool_call(tool, args)
     guard.evaluate_tool_call(tool, args)
 
